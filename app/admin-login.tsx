@@ -19,24 +19,38 @@ import { usePosStore } from '@/store/pos-store';
 
 export default function AdminLoginScreen() {
   const router = useRouter();
-  const { loginAdmin } = usePosStore();
-  const [adminUsername, setAdminUsername] = useState('');
+  const loginAdmin = usePosStore((state) => state.loginAdmin);
+  const authError = usePosStore((state) => state.authError);
+  const clearAuthError = usePosStore((state) => state.clearAuthError);
+  const session = usePosStore((state) => state.session);
+  const isInitialized = usePosStore((state) => state.isInitialized);
+  const isBootstrapping = usePosStore((state) => state.isBootstrapping);
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const [adminEmail, setAdminEmail] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string>('');
   const [loading, setLoading] = useState(false);
 
+  React.useEffect(() => {
+    if (!isInitialized || isBootstrapping) return;
+    if (session?.role === 'admin') {
+      void router.replace('/admin');
+    }
+  }, [isBootstrapping, isInitialized, router, session]);
+
   const handleAdminLogin = useCallback(async () => {
-    if (!adminUsername.trim() || !adminPassword) return;
+    if (!adminEmail.trim() || !adminPassword) return;
     setLoading(true);
     setError('');
+    clearAuthError();
     try {
-      const success = await loginAdmin(adminUsername.trim(), adminPassword);
+      const success = await loginAdmin(adminEmail.trim(), adminPassword);
       if (success) {
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         void router.replace('/admin');
       } else {
-        setError('Invalid username or password');
+        setError(usePosStore.getState().authError || 'Invalid email or password');
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       }
     } catch {
@@ -44,7 +58,7 @@ export default function AdminLoginScreen() {
     } finally {
       setLoading(false);
     }
-  }, [adminUsername, adminPassword, loginAdmin, router]);
+  }, [adminEmail, adminPassword, clearAuthError, loginAdmin, router, authError]);
 
   return (
     <View style={styles.bg}>
@@ -65,21 +79,26 @@ export default function AdminLoginScreen() {
               </TouchableOpacity>
 
               <Text style={styles.sectionTitle}>Admin Login</Text>
-              <Text style={styles.sectionSubtitle}>Enter your username and password</Text>
+              <Text style={styles.sectionSubtitle}>
+                {pairedAdmin
+                  ? `Device paired to ${pairedAdmin.email}. Enter admin credentials to manage this workspace.`
+                  : 'Enter the admin email and password for this Firebase project.'}
+              </Text>
 
               <View style={styles.form}>
                 <View style={styles.inputGroup}>
-                  <Text style={styles.label}>Username</Text>
+                  <Text style={styles.label}>Email</Text>
                   <TextInput
                     style={styles.input}
-                    value={adminUsername}
-                    onChangeText={setAdminUsername}
-                    placeholder="Enter username"
+                    value={adminEmail}
+                    onChangeText={setAdminEmail}
+                    placeholder="Enter admin email"
                     placeholderTextColor={Colors.textMuted}
                     autoCapitalize="none"
                     autoCorrect={false}
+                    keyboardType="email-address"
                     autoFocus
-                    testID="admin-username"
+                    testID="admin-email"
                   />
                 </View>
 
@@ -122,10 +141,10 @@ export default function AdminLoginScreen() {
                 <TouchableOpacity
                   style={[
                     styles.loginBtn,
-                    (!adminUsername.trim() || !adminPassword || loading) && styles.loginBtnDisabled,
+                    (!adminEmail.trim() || !adminPassword || loading) && styles.loginBtnDisabled,
                   ]}
                   onPress={handleAdminLogin}
-                  disabled={!adminUsername.trim() || !adminPassword || loading}
+                  disabled={!adminEmail.trim() || !adminPassword || loading}
                   activeOpacity={0.7}
                   testID="admin-login-submit"
                 >

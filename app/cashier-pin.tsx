@@ -4,23 +4,31 @@ import { useRouter, useLocalSearchParams, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import { useCashiers } from '@/hooks/use-pos-data';
 import PinInput from '@/components/PinInput';
 import { usePosStore } from '@/store/pos-store';
 
 export default function CashierPinScreen() {
   const router = useRouter();
   const { cashierId } = useLocalSearchParams<{ cashierId: string }>();
-  const { db, loginCashier, session } = usePosStore();
+  const loginCashier = usePosStore((state) => state.loginCashier);
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const session = usePosStore((state) => state.session);
   const [error, setError] = useState<string>('');
   const [loading, setLoading] = useState(false);
+  const { data: cashiers = [], isLoading } = useCashiers(pairedAdmin?.adminId);
 
   React.useEffect(() => {
-    if (session) {
+    if (!pairedAdmin) {
+      void router.replace('/');
+      return;
+    }
+    if (session?.role === 'cashier') {
       void router.replace('/cashier');
     }
-  }, [session, router]);
+  }, [pairedAdmin, session, router]);
 
-  const cashier = db.users.cashiers[cashierId ?? ''];
+  const cashier = cashiers.find((entry) => entry.cashierId === (cashierId ?? ''));
 
   const handleCashierPin = useCallback(async (pin: string) => {
     if (!cashierId) return;
@@ -42,10 +50,18 @@ export default function CashierPinScreen() {
     }
   }, [cashierId, loginCashier, router]);
 
-  if (!cashier) {
+  if (isLoading) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={Colors.primary} />
+      </View>
+    );
+  }
+
+  if (!cashier) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text style={styles.missingText}>Cashier not found</Text>
       </View>
     );
   }
@@ -102,5 +118,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Colors.primary,
     fontWeight: '500',
+  },
+  missingText: {
+    fontSize: 16,
+    color: Colors.textSecondary,
   },
 });

@@ -57,10 +57,23 @@ export interface POSEvent {
   stats: EventStats;
 }
 
+export type POSEventSummary = Omit<POSEvent, 'items' | 'orders'>;
+
+export interface AdminEventListItem extends POSEventSummary {
+  itemCount: number;
+}
+
 export interface AdminUser {
   adminId: string;
   username: string;
   passwordHash: string;
+  createdAt: number;
+}
+
+export interface AdminProfile {
+  adminId: string;
+  email: string;
+  displayName: string;
   createdAt: number;
 }
 
@@ -104,6 +117,12 @@ export interface CartLine {
   qty: number;
   maxQty?: number;
   reason?: string;
+}
+
+export interface CommitOrderResult {
+  order: Order;
+  updatedStats: EventStats;
+  updatedItemQuantities: Record<string, number>;
 }
 
 export function createEmptyStats(): EventStats {

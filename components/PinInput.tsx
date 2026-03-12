@@ -75,17 +75,19 @@ export default function PinInput({
       {subtitle && <Text style={styles.subtitle}>{subtitle}</Text>}
 
       <Animated.View
-        style={[styles.dotsRow, { transform: [{ translateX: shakeAnim }] }]}
+        style={[styles.digitsRow, { transform: [{ translateX: shakeAnim }] }]}
       >
         {Array.from({ length }).map((_, i) => (
           <View
             key={i}
             style={[
-              styles.dot,
-              i < pin.length && styles.dotFilled,
-              error ? styles.dotError : undefined,
+              styles.digitCell,
+              i < pin.length && styles.digitCellFilled,
+              error ? styles.digitCellError : undefined,
             ]}
-          />
+          >
+            <Text style={styles.digitText}>{pin[i] ?? ''}</Text>
+          </View>
         ))}
       </Animated.View>
 
@@ -144,26 +146,33 @@ const styles = StyleSheet.create({
     marginBottom: 32,
     textAlign: 'center',
   },
-  dotsRow: {
+  digitsRow: {
     flexDirection: 'row',
     gap: 16,
     marginBottom: 12,
   },
-  dot: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+  digitCell: {
+    width: 52,
+    height: 60,
+    borderRadius: 14,
     borderWidth: 2,
     borderColor: Colors.border,
-    backgroundColor: Colors.transparent,
+    backgroundColor: Colors.card,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  dotFilled: {
-    backgroundColor: Colors.primary,
+  digitCellFilled: {
+    backgroundColor: Colors.primaryBg,
     borderColor: Colors.primary,
   },
-  dotError: {
+  digitCellError: {
     borderColor: Colors.danger,
-    backgroundColor: Colors.danger,
+    backgroundColor: Colors.dangerBg,
+  },
+  digitText: {
+    fontSize: 28,
+    fontWeight: '700' as const,
+    color: Colors.text,
   },
   errorText: {
     color: Colors.danger,

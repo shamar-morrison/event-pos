@@ -4,6 +4,7 @@ import {
   Text,
   StyleSheet,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, Stack } from 'expo-router';
 import {
@@ -16,6 +17,7 @@ import {
 } from 'lucide-react-native';
 import Colors, { getPaymentColor } from '@/constants/colors';
 import StatusBadge from '@/components/StatusBadge';
+import { useAdminEventReport, useCashiers } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney } from '@/utils/money';
 import type { PaymentMethod } from '@/types/pos';
@@ -40,8 +42,9 @@ const PaymentIcon = ({ method, size }: { method: PaymentMethod; size: number }) 
 
 export default function ReportsScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
-  const db = usePosStore((s) => s.db);
-  const event = db.events[eventId ?? ''];
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const { data: event, isLoading } = useAdminEventReport(pairedAdmin?.adminId, eventId);
+  const { data: cashiers = [] } = useCashiers(pairedAdmin?.adminId);
 
   const orders = useMemo(
     () => (event ? Object.values(event.orders).sort((a, b) => b.createdAt - a.createdAt) : []),
@@ -60,10 +63,18 @@ export default function ReportsScreen() {
       .sort((a, b) => b.revenue - a.revenue);
   }, [event]);
 
-  const cashiers = useMemo(() => {
-    const db2 = usePosStore.getState().db;
-    return db2.users.cashiers;
-  }, []);
+  const cashiersById = useMemo(
+    () => Object.fromEntries(cashiers.map((cashier) => [cashier.cashierId, cashier])),
+    [cashiers]
+  );
+
+  if (isLoading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+      </View>
+    );
+  }
 
   if (!event) {
     return (
@@ -134,7 +145,7 @@ export default function ReportsScreen() {
             <Text style={styles.sectionTitle}>Recent Orders</Text>
             <View style={styles.ordersList}>
               {orders.slice(0, 50).map((order) => {
-                const cashierName = cashiers[order.cashierId]?.name ?? 'Unknown';
+                const cashierName = cashiersById[order.cashierId]?.name ?? 'Unknown';
                 return (
                   <View key={order.orderId} style={styles.orderCard}>
                     <View style={styles.orderHeader}>

@@ -9,14 +9,19 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import { posKeys } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
+import { createEmptyStats, type AdminEventListItem } from '@/types/pos';
 
 export default function CreateEventScreen() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const createEvent = usePosStore((s) => s.createEvent);
+  const pairedAdmin = usePosStore((s) => s.pairedAdmin);
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -28,10 +33,32 @@ export default function CreateEventScreen() {
     }
     setLoading(true);
     try {
+      if (!pairedAdmin) {
+        throw new Error('This device is not paired to an admin.');
+      }
+
       const eventId = await createEvent(trimmed);
+      const now = Date.now();
+      queryClient.setQueryData<AdminEventListItem[]>(posKeys.events(pairedAdmin.adminId), (current = []) =>
+        [
+          {
+            eventId,
+            name: trimmed,
+            startTime: now,
+            status: 'draft' as const,
+            createdAt: now,
+            createdBy: pairedAdmin.adminId,
+            defaultPaymentMethod: undefined,
+            stats: createEmptyStats(),
+            endTime: undefined,
+            itemCount: 0,
+          },
+          ...current.filter((event) => event.eventId !== eventId),
+        ].sort((left, right) => right.createdAt - left.createdAt)
+      );
+      void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      router.back();
-      setTimeout(() => router.push(`/admin/event/${eventId}`), 100);
+      router.replace(`/admin/event/${eventId}`);
     } catch (e) {
       Alert.alert('Error', 'Failed to create event');
       console.error('[CreateEvent]', e);

@@ -13,25 +13,33 @@ import { LogOut, Zap, Calendar } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import EmptyState from '@/components/EmptyState';
+import { useCashierEvents } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 
 export default function CashierEventsScreen() {
   const router = useRouter();
-  const { db, session, logout, setCurrentEvent } = usePosStore();
-
-  const liveEvents = useMemo(
-    () => Object.values(db.events).filter((e) => e.status === 'live').sort((a, b) => b.createdAt - a.createdAt),
-    [db.events]
-  );
+  const session = usePosStore((state) => state.session);
+  const logout = usePosStore((state) => state.logout);
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const setCurrentEvent = usePosStore((state) => state.setCurrentEvent);
+  const unpairDevice = usePosStore((state) => state.unpairDevice);
+  const { data: liveEvents = [] } = useCashierEvents(pairedAdmin?.adminId);
 
   const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure?', [
+    Alert.alert('Cashier Session', 'Choose how you want to leave cashier mode.', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Logout',
-        style: 'destructive',
+        text: 'Logout Cashier',
         onPress: async () => {
           await logout();
+          router.replace('/');
+        },
+      },
+      {
+        text: 'Unpair Device',
+        style: 'destructive',
+        onPress: async () => {
+          await unpairDevice();
           router.replace('/');
         },
       },
@@ -52,7 +60,9 @@ export default function CashierEventsScreen() {
             <Text style={styles.greeting}>
               Hi, {session?.cashierName ?? 'Cashier'}
             </Text>
-            <Text style={styles.subtitle}>Select an event to start selling</Text>
+            <Text style={styles.subtitle}>
+              {pairedAdmin ? `Selling for ${pairedAdmin.email}` : 'Select an event to start selling'}
+            </Text>
           </View>
           <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
             <LogOut size={20} color={Colors.textSecondary} />
@@ -69,7 +79,7 @@ export default function CashierEventsScreen() {
           ) : (
             <View style={styles.eventList}>
               {liveEvents.map((event) => {
-                const itemCount = Object.keys(event.items).length;
+                const itemCount = event.itemCount;
                 return (
                   <TouchableOpacity
                     key={event.eventId}

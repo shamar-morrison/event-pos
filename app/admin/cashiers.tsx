@@ -10,26 +10,38 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 import { UserPlus, Trash2, Users } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import EmptyState from '@/components/EmptyState';
+import { posKeys, useCashiers } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
+import type { CashierUser } from '@/types/pos';
 import { validatePinFormat } from '@/utils/pin';
 
 export default function CashiersScreen() {
-  const { db, createCashier, removeCashier } = usePosStore();
+  const queryClient = useQueryClient();
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const createCashier = usePosStore((state) => state.createCashier);
+  const removeCashier = usePosStore((state) => state.removeCashier);
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
   const [pin, setPin] = useState('');
   const [loading, setLoading] = useState(false);
+  const { data: cashierData = [] } = useCashiers(pairedAdmin?.adminId);
 
   const cashiers = useMemo(
-    () => Object.values(db.users.cashiers).sort((a, b) => b.createdAt - a.createdAt),
-    [db.users.cashiers]
+    () => [...cashierData].sort((a, b) => b.createdAt - a.createdAt),
+    [cashierData]
   );
 
   const handleCreate = async () => {
+    if (!pairedAdmin) {
+      Alert.alert('Error', 'This device is not paired to an admin.');
+      return;
+    }
+
     const trimmedName = name.trim();
     if (!trimmedName) {
       Alert.alert('Error', 'Please enter a name');
@@ -42,7 +54,19 @@ export default function CashiersScreen() {
     }
     setLoading(true);
     try {
-      await createCashier(trimmedName, pin);
+      const cashierId = await createCashier(trimmedName, pin);
+      queryClient.setQueryData<CashierUser[]>(posKeys.cashiers(pairedAdmin.adminId), (current = []) =>
+        [
+          {
+            cashierId,
+            name: trimmedName,
+            pinHash: '',
+            createdAt: Date.now(),
+          },
+          ...current.filter((cashier) => cashier.cashierId !== cashierId),
+        ].sort((a, b) => b.createdAt - a.createdAt)
+      );
+      void queryClient.invalidateQueries({ queryKey: posKeys.cashiers(pairedAdmin.adminId) });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setName('');
       setPin('');
@@ -56,14 +80,28 @@ export default function CashiersScreen() {
   };
 
   const handleRemove = (cashierId: string, cashierName: string) => {
+    if (!pairedAdmin) {
+      Alert.alert('Error', 'This device is not paired to an admin.');
+      return;
+    }
+
     Alert.alert('Remove Cashier', `Remove ${cashierName}? They won't be able to log in.`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Remove',
         style: 'destructive',
-        onPress: () => {
-          removeCashier(cashierId);
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        onPress: async () => {
+          try {
+            await removeCashier(cashierId);
+            queryClient.setQueryData<CashierUser[]>(posKeys.cashiers(pairedAdmin.adminId), (current = []) =>
+              current.filter((cashier) => cashier.cashierId !== cashierId)
+            );
+            void queryClient.invalidateQueries({ queryKey: posKeys.cashiers(pairedAdmin.adminId) });
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          } catch (error) {
+            console.error('[Cashiers] Failed to remove cashier:', error);
+            Alert.alert('Error', 'Failed to remove cashier');
+          }
         },
       },
     ]);
@@ -98,7 +136,6 @@ export default function CashiersScreen() {
               placeholderTextColor={Colors.textMuted}
               keyboardType="number-pad"
               maxLength={6}
-              secureTextEntry
             />
             <TouchableOpacity
               style={[styles.submitBtn, loading && styles.submitBtnDisabled]}

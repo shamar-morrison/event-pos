@@ -22,17 +22,17 @@ import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import StatusBadge from '@/components/StatusBadge';
 import EmptyState from '@/components/EmptyState';
+import { useAdminEvents, useCashiers } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney } from '@/utils/money';
 
 export default function AdminDashboard() {
   const router = useRouter();
-  const { db, logout } = usePosStore();
-
-  const events = useMemo(
-    () => Object.values(db.events).sort((a, b) => b.createdAt - a.createdAt),
-    [db.events]
-  );
+  const logout = usePosStore((state) => state.logout);
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const unpairDevice = usePosStore((state) => state.unpairDevice);
+  const { data: events = [] } = useAdminEvents(pairedAdmin?.adminId, { realtime: true });
+  const { data: cashiers = [] } = useCashiers(pairedAdmin?.adminId);
 
   const stats = useMemo(() => {
     const liveCount = events.filter((e) => e.status === 'live').length;
@@ -41,16 +41,23 @@ export default function AdminDashboard() {
     return { liveCount, totalRevenue, totalOrders };
   }, [events]);
 
-  const cashierCount = Object.keys(db.users.cashiers).length;
+  const cashierCount = cashiers.length;
 
   const handleLogout = () => {
-    Alert.alert('Logout', 'Are you sure you want to log out?', [
+    Alert.alert('Admin Access', 'Choose how you want to leave the admin panel.', [
       { text: 'Cancel', style: 'cancel' },
       {
-        text: 'Logout',
-        style: 'destructive',
+        text: 'Exit Admin',
         onPress: async () => {
           await logout();
+          router.replace('/');
+        },
+      },
+      {
+        text: 'Unpair Device',
+        style: 'destructive',
+        onPress: async () => {
+          await unpairDevice();
           router.replace('/');
         },
       },
@@ -63,7 +70,7 @@ export default function AdminDashboard() {
         <View style={styles.header}>
           <View>
             <Text style={styles.greeting}>Admin Panel</Text>
-            <Text style={styles.subtitle}>Event Drink POS</Text>
+            <Text style={styles.subtitle}>{pairedAdmin?.email ?? 'Event Drink POS'}</Text>
           </View>
           <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout} testID="logout-btn">
             <LogOut size={20} color={Colors.textSecondary} />
@@ -127,7 +134,7 @@ export default function AdminDashboard() {
           ) : (
             <View style={styles.eventList}>
               {events.map((event) => {
-                const itemCount = Object.keys(event.items).length;
+                const itemCount = event.itemCount;
                 const orderCount = event.stats.totalOrders;
                 return (
                   <TouchableOpacity

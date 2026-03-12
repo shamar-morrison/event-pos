@@ -10,33 +10,34 @@ import {
   TextInput,
   KeyboardAvoidingView,
 } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 import { Download, Upload, FileText } from 'lucide-react-native';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import { posKeys, useAdminEvents } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney } from '@/utils/money';
 
 export default function ExportImportScreen() {
-  const { db, getEventExportJSON, importEventFromJSON } = usePosStore();
+  const queryClient = useQueryClient();
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const getEventExportJSON = usePosStore((state) => state.getEventExportJSON);
+  const importEventFromJSON = usePosStore((state) => state.importEventFromJSON);
   const [importJson, setImportJson] = useState('');
   const [importing, setImporting] = useState(false);
-
-  const events = useMemo(
-    () => Object.values(db.events).sort((a, b) => b.createdAt - a.createdAt),
-    [db.events]
-  );
+  const { data: events = [] } = useAdminEvents(pairedAdmin?.adminId);
 
   const handleExport = async (eventId: string) => {
     try {
-      const json = getEventExportJSON(eventId);
+      const json = await getEventExportJSON(eventId);
       if (!json) {
         Alert.alert('Error', 'Event not found');
         return;
       }
 
-      const event = db.events[eventId];
+      const event = events.find((entry) => entry.eventId === eventId);
       const filename = `event_${event?.name?.replace(/[^a-zA-Z0-9]/g, '_') ?? eventId}.json`;
 
       if (Platform.OS === 'web') {
@@ -72,7 +73,12 @@ export default function ExportImportScreen() {
     }
     setImporting(true);
     try {
+      if (!pairedAdmin) {
+        throw new Error('This device is not paired to an admin.');
+      }
+
       const newId = await importEventFromJSON(trimmed);
+      void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('Success', `Event imported successfully (ID: ${newId.slice(0, 8)}...)`);
       setImportJson('');

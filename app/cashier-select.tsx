@@ -12,20 +12,27 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ChevronRight } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import { useCashiers } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 
 export default function CashierSelectScreen() {
   const router = useRouter();
-  const { db, isInitialized, session } = usePosStore();
+  const isInitialized = usePosStore((state) => state.isInitialized);
+  const isBootstrapping = usePosStore((state) => state.isBootstrapping);
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const session = usePosStore((state) => state.session);
+  const { data: cashiers = [], isLoading } = useCashiers(pairedAdmin?.adminId);
 
   React.useEffect(() => {
-    if (!isInitialized) return;
-    if (session) {
+    if (!isInitialized || isBootstrapping) return;
+    if (!pairedAdmin) {
+      void router.replace('/');
+      return;
+    }
+    if (session?.role === 'cashier') {
       void router.replace('/cashier');
     }
-  }, [isInitialized, session, router]);
-
-  const cashiers = Object.values(db.users.cashiers);
+  }, [isBootstrapping, isInitialized, pairedAdmin, router, session]);
 
   const handleSelectCashier = (cashierId: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -35,7 +42,7 @@ export default function CashierSelectScreen() {
     });
   };
 
-  if (!isInitialized) {
+  if (!isInitialized || isBootstrapping || isLoading) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={Colors.primary} />
@@ -54,7 +61,9 @@ export default function CashierSelectScreen() {
             </TouchableOpacity>
 
             <Text style={styles.sectionTitle}>Select Cashier</Text>
-            <Text style={styles.sectionSubtitle}>Choose your profile to continue</Text>
+            <Text style={styles.sectionSubtitle}>
+              {pairedAdmin ? `Choose a cashier for ${pairedAdmin.email}` : 'This device is not paired to an admin'}
+            </Text>
 
             <View style={styles.cashierList}>
               {cashiers.map((c) => (
@@ -76,7 +85,7 @@ export default function CashierSelectScreen() {
             {cashiers.length === 0 && (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyText}>No cashiers available</Text>
-                <Text style={styles.emptySubtext}>Please contact an admin to create cashier accounts</Text>
+                <Text style={styles.emptySubtext}>Please contact the paired admin to create cashier accounts</Text>
               </View>
             )}
           </View>

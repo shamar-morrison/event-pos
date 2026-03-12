@@ -13,7 +13,9 @@ import {
   FlatList,
   Keyboard,
   InputAccessoryView,
+  ActivityIndicator,
 } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 import { useRef } from 'react';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import {
@@ -38,6 +40,7 @@ import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
 import StatusBadge from '@/components/StatusBadge';
 import EmptyState from '@/components/EmptyState';
+import { posKeys, useAdminEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 import PRESET_DRINKS, { PresetDrink } from '@/constants/preset-drinks';
@@ -54,9 +57,16 @@ const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; IconComp: typeof Ban
 export default function EventDetailScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const router = useRouter();
-  const { db, updateEventStatus, addItem, restockItem, setItemQuantity, removeItem, deleteEvent, setDefaultPaymentMethod } = usePosStore();
-
-  const event = db.events[eventId ?? ''];
+  const queryClient = useQueryClient();
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const updateEventStatus = usePosStore((state) => state.updateEventStatus);
+  const addItem = usePosStore((state) => state.addItem);
+  const restockItem = usePosStore((state) => state.restockItem);
+  const setItemQuantity = usePosStore((state) => state.setItemQuantity);
+  const removeItem = usePosStore((state) => state.removeItem);
+  const deleteEvent = usePosStore((state) => state.deleteEvent);
+  const setDefaultPaymentMethod = usePosStore((state) => state.setDefaultPaymentMethod);
+  const { data: event, isLoading } = useAdminEventDetail(pairedAdmin?.adminId, eventId);
 
   const [showAddItem, setShowAddItem] = useState(false);
   const [addMode, setAddMode] = useState<'preset' | 'custom'>('preset');
@@ -99,6 +109,9 @@ export default function EventDetailScreen() {
           onPress: async () => {
             try {
               await updateEventStatus(eventId, newStatus);
+              if (pairedAdmin) {
+                void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
+              }
               Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
             } catch (e: unknown) {
               const msg = e instanceof Error ? e.message : 'Failed';
@@ -108,7 +121,7 @@ export default function EventDetailScreen() {
         },
       ]);
     },
-    [eventId, updateEventStatus]
+    [eventId, pairedAdmin, queryClient, updateEventStatus]
   );
 
   const handleSelectPreset = useCallback((preset: PresetDrink) => {
@@ -136,6 +149,9 @@ export default function EventDetailScreen() {
     setAddLoading(true);
     try {
       await addItem(eventId, trimmedName, priceCents, qty);
+      if (pairedAdmin) {
+        void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setItemName('');
       setItemPrice('');
@@ -166,6 +182,9 @@ export default function EventDetailScreen() {
         const newQty = Math.max(0, item.qtyRemaining - qty);
         await setItemQuantity(eventId, adjustModal, newQty);
       }
+      if (pairedAdmin) {
+        void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setAdjustModal(null);
       setAdjustQty('');
@@ -180,12 +199,15 @@ export default function EventDetailScreen() {
     try {
       const current = event?.defaultPaymentMethod;
       await setDefaultPaymentMethod(eventId, current === method ? undefined : method);
+      if (pairedAdmin) {
+        void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
+      }
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed';
       Alert.alert('Error', msg);
     }
-  }, [eventId, event?.defaultPaymentMethod, setDefaultPaymentMethod]);
+  }, [event?.defaultPaymentMethod, eventId, pairedAdmin, queryClient, setDefaultPaymentMethod]);
 
   const handleRemoveItem = (itemId: string, name: string) => {
     if (!eventId) return;
@@ -194,7 +216,17 @@ export default function EventDetailScreen() {
       {
         text: 'Remove',
         style: 'destructive',
-        onPress: () => removeItem(eventId, itemId),
+        onPress: async () => {
+          try {
+            await removeItem(eventId, itemId);
+            if (pairedAdmin) {
+              void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
+            }
+          } catch (error) {
+            console.error('[EventDetail] Failed to remove item:', error);
+            Alert.alert('Error', 'Failed to remove item');
+          }
+        },
       },
     ]);
   };
@@ -208,11 +240,22 @@ export default function EventDetailScreen() {
         style: 'destructive',
         onPress: async () => {
           await deleteEvent(eventId);
+          if (pairedAdmin) {
+            void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
+          }
           router.back();
         },
       },
     ]);
   };
+
+  if (isLoading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+      </View>
+    );
+  }
 
   if (!event) {
     return (

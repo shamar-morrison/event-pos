@@ -11,6 +11,7 @@ import {
   Dimensions,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import {
@@ -23,6 +24,7 @@ import {
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import { useCashierEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 import type { CartLine } from '@/types/pos';
@@ -35,18 +37,15 @@ const CARD_WIDTH = (SCREEN_WIDTH - 40 - CARD_GAP * (GRID_COLS - 1)) / GRID_COLS;
 export default function POSScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const router = useRouter();
-  const {
-    db,
-    cart,
-    addToCart,
-    incrementCartLine,
-    decrementCartLine,
-    removeCartLine,
-    clearCart,
-    setCurrentEvent,
-  } = usePosStore();
-
-  const event = db.events[eventId ?? ''];
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const cart = usePosStore((state) => state.cart);
+  const addToCart = usePosStore((state) => state.addToCart);
+  const incrementCartLine = usePosStore((state) => state.incrementCartLine);
+  const decrementCartLine = usePosStore((state) => state.decrementCartLine);
+  const removeCartLine = usePosStore((state) => state.removeCartLine);
+  const clearCart = usePosStore((state) => state.clearCart);
+  const setCurrentEvent = usePosStore((state) => state.setCurrentEvent);
+  const { data: event, isLoading } = useCashierEventDetail(pairedAdmin?.adminId, eventId);
   const [showCart, setShowCart] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [manualName, setManualName] = useState('');
@@ -137,6 +136,14 @@ export default function POSScreen() {
     setShowCart(false);
     router.push('/cashier/checkout');
   };
+
+  if (isLoading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+      </View>
+    );
+  }
 
   if (!event) {
     return (

@@ -12,18 +12,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Shield, User, ChevronRight } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import { useCashiers } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 
 export default function RoleSelectScreen() {
   const router = useRouter();
-  const { db, session, isInitialized, hasAdmins } = usePosStore();
+  const session = usePosStore((state) => state.session);
+  const pairedAdmin = usePosStore((state) => state.pairedAdmin);
+  const isInitialized = usePosStore((state) => state.isInitialized);
+  const isBootstrapping = usePosStore((state) => state.isBootstrapping);
+  const authError = usePosStore((state) => state.authError);
+  const clearAuthError = usePosStore((state) => state.clearAuthError);
+  const { data: cashiers = [] } = useCashiers(pairedAdmin?.adminId);
 
   React.useEffect(() => {
-    if (!isInitialized) return;
-    if (!hasAdmins()) {
-      void router.replace('/setup');
-      return;
-    }
+    if (!isInitialized || isBootstrapping) return;
     if (session) {
       if (session.role === 'admin') {
         void router.replace('/admin');
@@ -31,11 +34,9 @@ export default function RoleSelectScreen() {
         void router.replace('/cashier');
       }
     }
-  }, [isInitialized, session, router, hasAdmins]);
+  }, [isBootstrapping, isInitialized, router, session]);
 
-  const cashiers = Object.values(db.users.cashiers);
-
-  if (!isInitialized) {
+  if (!isInitialized || isBootstrapping) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={Colors.primary} />
@@ -53,8 +54,20 @@ export default function RoleSelectScreen() {
                 <Text style={styles.logoText}>EP</Text>
               </View>
               <Text style={styles.appTitle}>Welcome to Event POS</Text>
-              <Text style={styles.appSubtitle}>Select your role to continue</Text>
+              <Text style={styles.appSubtitle}>
+                {pairedAdmin ? `Paired to ${pairedAdmin.email}` : 'Pair this device with an admin to continue'}
+              </Text>
             </View>
+
+            {authError ? (
+              <TouchableOpacity
+                style={styles.errorBox}
+                onPress={clearAuthError}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.errorText}>{authError}</Text>
+              </TouchableOpacity>
+            ) : null}
 
             <View style={styles.roleCards}>
               <TouchableOpacity
@@ -71,19 +84,21 @@ export default function RoleSelectScreen() {
                 </View>
                 <View style={styles.roleInfo}>
                   <Text style={styles.roleName}>Admin</Text>
-                  <Text style={styles.roleDesc}>Manage events & inventory</Text>
+                  <Text style={styles.roleDesc}>
+                    {pairedAdmin ? 'Re-enter admin credentials to manage events' : 'Pair this device with an admin account'}
+                  </Text>
                 </View>
                 <ChevronRight size={20} color={Colors.textMuted} />
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.roleCard, cashiers.length === 0 && styles.roleCardDisabled]}
+                style={[styles.roleCard, (!pairedAdmin || cashiers.length === 0) && styles.roleCardDisabled]}
                 onPress={() => {
-                  if (cashiers.length === 0) return;
+                  if (!pairedAdmin || cashiers.length === 0) return;
                   void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
                   void router.push('/cashier-select');
                 }}
-                activeOpacity={cashiers.length > 0 ? 0.7 : 1}
+                activeOpacity={pairedAdmin && cashiers.length > 0 ? 0.7 : 1}
                 testID="login-cashier"
               >
                 <View style={[styles.roleIcon, { backgroundColor: Colors.infoBg }]}>
@@ -92,7 +107,11 @@ export default function RoleSelectScreen() {
                 <View style={styles.roleInfo}>
                   <Text style={styles.roleName}>Cashier</Text>
                   <Text style={styles.roleDesc}>
-                    {cashiers.length > 0 ? `${cashiers.length} cashier${cashiers.length > 1 ? 's' : ''} available` : 'No cashiers yet'}
+                    {!pairedAdmin
+                      ? 'Admin must pair this device first'
+                      : cashiers.length > 0
+                        ? `${cashiers.length} cashier${cashiers.length > 1 ? 's' : ''} available`
+                        : 'No cashiers yet'}
                   </Text>
                 </View>
                 <ChevronRight size={20} color={Colors.textMuted} />
@@ -156,6 +175,18 @@ const styles = StyleSheet.create({
   },
   roleCards: {
     gap: 12,
+  },
+  errorBox: {
+    backgroundColor: Colors.dangerBg,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: Colors.danger,
+    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '600',
   },
   roleCard: {
     flexDirection: 'row',

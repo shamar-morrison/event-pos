@@ -1,37 +1,67 @@
 import { create } from 'zustand';
 import {
-  POSDatabase,
-  Session,
   CartLine,
+  CommitOrderResult,
+  EventStatus,
   Order,
   OrderLine,
-  EventItem,
-  POSEvent,
   PaymentMethod,
-  EventStatus,
-  createEmptyDB,
+  POSEvent,
+  Session,
   createEmptyStats,
+  type AdminProfile,
 } from '@/types/pos';
-import { loadDB, saveDB, loadSession, saveSession } from '@/db/database';
-import { hashPin, verifyPin, hashPassword, verifyPassword } from '@/utils/pin';
+import { clearLegacyLocalData, loadSession, saveSession } from '@/db/database';
+import { auth, db as firestoreDb } from '@/firebase/config';
+import {
+  auditLogDocRef,
+  cashierDocRef,
+  eventDocRef,
+  eventItemDocRef,
+  eventItemsCollectionRef,
+  eventOrderDocRef,
+  eventOrdersCollectionRef,
+  fetchEventDetail,
+  loadAdminProfile,
+  loadCashier,
+} from '@/services/pos-firestore';
+import { queryClient } from '@/lib/query-client';
+import { hashPin, verifyPin } from '@/utils/pin';
 import { generateId } from '@/utils/uuid';
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth';
+import {
+  deleteField,
+  getDoc,
+  getDocs,
+  increment,
+  runTransaction,
+  writeBatch,
+} from 'firebase/firestore';
 
 let commitLock = false;
+let authUnsubscribe: (() => void) | null = null;
+let initializePromise: Promise<void> | null = null;
+let resolveInitialize: (() => void) | null = null;
+let pendingAuthError: string | null = null;
+let initializeTimeout: ReturnType<typeof setTimeout> | null = null;
 
 interface PosStore {
-  db: POSDatabase;
   session: Session | null;
+  pairedAdmin: AdminProfile | null;
   isInitialized: boolean;
+  isBootstrapping: boolean;
+  authError: string | null;
   cart: CartLine[];
   currentEventId: string | null;
 
   initialize: () => Promise<void>;
+  clearAuthError: () => void;
 
-  setupAdmin: (username: string, password: string) => Promise<void>;
-  loginAdmin: (username: string, password: string) => Promise<boolean>;
-  hasAdmins: () => boolean;
+  loginAdmin: (email: string, password: string) => Promise<boolean>;
+  hasPairedAdmin: () => boolean;
   loginCashier: (cashierId: string, pin: string) => Promise<boolean>;
   logout: () => Promise<void>;
+  unpairDevice: () => Promise<void>;
 
   createEvent: (name: string) => Promise<string>;
   updateEventStatus: (eventId: string, status: EventStatus) => Promise<void>;
@@ -53,588 +83,731 @@ interface PosStore {
   removeCartLine: (index: number) => void;
   clearCart: () => void;
 
-  commitOrder: (paymentMethod: PaymentMethod, cashReceivedCents?: number) => Promise<Order>;
+  commitOrder: (paymentMethod: PaymentMethod, cashReceivedCents?: number) => Promise<CommitOrderResult>;
 
-  getEvent: (eventId: string) => POSEvent | undefined;
-  getLiveEvents: () => POSEvent[];
   getCartTotal: () => number;
   getCartItemCount: () => number;
-  getEventExportJSON: (eventId: string) => string | null;
+  getEventExportJSON: (eventId: string) => Promise<string | null>;
   importEventFromJSON: (json: string) => Promise<string>;
 }
 
-export const usePosStore = create<PosStore>((set, get) => ({
-  db: createEmptyDB(),
-  session: null,
-  isInitialized: false,
-  cart: [],
-  currentEventId: null,
+function normalizeSessionForAdmin(session: Session | null, admin: AdminProfile): Session | null {
+  if (!session || session.adminId !== admin.adminId) {
+    return null;
+  }
 
-  initialize: async () => {
-    console.log('[Store] Initializing...');
-    const [db, session] = await Promise.all([loadDB(), loadSession()]);
-    set({ db, session, isInitialized: true });
-    console.log('[Store] Initialized. Admins count:', Object.keys(db.users.admins).length);
-  },
-
-  setupAdmin: async (username: string, password: string) => {
-    const { db } = get();
-    const adminId = generateId();
-    const passwordHash = await hashPassword(password);
-    const now = Date.now();
-    const adminUser = { adminId, username: username.trim(), passwordHash, createdAt: now };
-    const updatedDb: POSDatabase = {
-      ...db,
-      users: {
-        ...db.users,
-        admins: { ...db.users.admins, [adminId]: adminUser },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: now, type: 'admin_setup', meta: { adminId, username: username.trim() } },
-      ],
+  if (session.role === 'admin') {
+    return {
+      ...session,
+      adminId: admin.adminId,
+      adminUsername: admin.email,
     };
-    await saveDB(updatedDb);
-    const session: Session = { role: 'admin', adminId, adminUsername: username.trim() };
-    await saveSession(session);
-    set({ db: updatedDb, session });
-    console.log('[Store] Admin setup complete:', username.trim());
-  },
+  }
 
-  loginAdmin: async (username: string, password: string) => {
-    const { db } = get();
-    const admins = Object.values(db.users.admins);
-    const admin = admins.find((a) => a.username.toLowerCase() === username.trim().toLowerCase());
-    if (!admin) return false;
-    const valid = await verifyPassword(password, admin.passwordHash);
-    if (valid) {
-      const session: Session = { role: 'admin', adminId: admin.adminId, adminUsername: admin.username };
-      await saveSession(session);
-      set({ session });
-      console.log('[Store] Admin logged in:', admin.username);
+  return {
+    ...session,
+    adminId: admin.adminId,
+  };
+}
+
+function areSessionsEqual(left: Session | null, right: Session | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+
+  return (
+    left.role === right.role &&
+    left.adminId === right.adminId &&
+    left.adminUsername === right.adminUsername &&
+    left.cashierId === right.cashierId &&
+    left.cashierName === right.cashierName
+  );
+}
+
+function buildAuditEntry(type: string, meta: Record<string, unknown>, ts = Date.now()) {
+  const id = generateId();
+  return {
+    id,
+    ts,
+    type,
+    meta,
+  };
+}
+
+export const usePosStore = create<PosStore>((set, get) => {
+  const markInitialized = () => {
+    if (initializeTimeout) {
+      clearTimeout(initializeTimeout);
+      initializeTimeout = null;
     }
-    return valid;
-  },
+    set({ isInitialized: true });
+    if (resolveInitialize) {
+      resolveInitialize();
+      resolveInitialize = null;
+      initializePromise = null;
+    }
+  };
 
-  hasAdmins: () => {
-    const { db } = get();
-    return Object.keys(db.users.admins).length > 0;
-  },
+  const resetAuthState = (authError: string | null) => {
+    queryClient.clear();
+    set({
+      session: null,
+      pairedAdmin: null,
+      isBootstrapping: false,
+      authError,
+      cart: [],
+      currentEventId: null,
+    });
+  };
 
-  loginCashier: async (cashierId: string, pin: string) => {
-    const { db } = get();
-    const cashier = db.users.cashiers[cashierId];
-    if (!cashier) return false;
-    const valid = await verifyPin(pin, cashier.pinHash);
-    if (valid) {
+  const requirePairedAdmin = () => {
+    const pairedAdmin = get().pairedAdmin;
+    if (!pairedAdmin) {
+      throw new Error('This device is not paired to an admin account.');
+    }
+    return pairedAdmin;
+  };
+
+  const requireAdminSession = () => {
+    const { session } = get();
+    const pairedAdmin = requirePairedAdmin();
+
+    if (!session || session.role !== 'admin' || session.adminId !== pairedAdmin.adminId) {
+      throw new Error('Admin sign-in is required.');
+    }
+
+    return pairedAdmin;
+  };
+
+  const handleSignedOut = async () => {
+    const authError = pendingAuthError;
+    pendingAuthError = null;
+    await saveSession(null);
+    resetAuthState(authError);
+    markInitialized();
+  };
+
+  const handleSignedIn = async (user: FirebaseUser) => {
+    set({ isBootstrapping: true, authError: null });
+
+    const profile = await loadAdminProfile(user.uid, user.email);
+    if (!profile) {
+      pendingAuthError = 'This Firebase account is not registered as an admin.';
+      await saveSession(null);
+      resetAuthState(pendingAuthError);
+      markInitialized();
+      await signOut(auth);
+      return;
+    }
+
+    let normalizedSession = normalizeSessionForAdmin(get().session, profile);
+
+    if (normalizedSession?.role === 'cashier' && normalizedSession.cashierId) {
+      const cashier = await loadCashier(profile.adminId, normalizedSession.cashierId);
+      if (!cashier) {
+        normalizedSession = null;
+      } else {
+        normalizedSession = {
+          ...normalizedSession,
+          cashierName: cashier.name,
+        };
+      }
+    }
+
+    if (!areSessionsEqual(get().session, normalizedSession)) {
+      await saveSession(normalizedSession);
+    }
+
+    set({
+      pairedAdmin: profile,
+      session: normalizedSession,
+      isBootstrapping: false,
+      authError: null,
+    });
+    markInitialized();
+  };
+
+  return {
+    session: null,
+    pairedAdmin: null,
+    isInitialized: false,
+    isBootstrapping: true,
+    authError: null,
+    cart: [],
+    currentEventId: null,
+
+    initialize: async () => {
+      if (authUnsubscribe) {
+        return initializePromise ?? Promise.resolve();
+      }
+
+      const session = await loadSession();
+      await clearLegacyLocalData();
+      set({ session, isBootstrapping: true });
+
+      initializePromise = new Promise<void>((resolve) => {
+        resolveInitialize = resolve;
+      });
+
+      initializeTimeout = setTimeout(() => {
+        console.error('[Store] Initialization timed out while waiting for Firebase auth state.');
+        set({
+          isBootstrapping: false,
+          authError: 'Initialization timed out. Check your Firebase config and restart Expo.',
+        });
+        markInitialized();
+      }, 5000);
+
+      authUnsubscribe = onAuthStateChanged(auth, (user) => {
+        if (!user) {
+          void handleSignedOut();
+          return;
+        }
+
+        void handleSignedIn(user);
+      });
+
+      return initializePromise;
+    },
+
+    clearAuthError: () => {
+      pendingAuthError = null;
+      set({ authError: null });
+    },
+
+    loginAdmin: async (email: string, password: string) => {
+      try {
+        const credentials = await signInWithEmailAndPassword(auth, email.trim(), password);
+        const profile = await loadAdminProfile(credentials.user.uid, credentials.user.email);
+
+        if (!profile) {
+          pendingAuthError = 'This Firebase account is not registered as an admin.';
+          await signOut(auth);
+          set({ authError: pendingAuthError });
+          return false;
+        }
+
+        queryClient.clear();
+
+        const session: Session = {
+          role: 'admin',
+          adminId: profile.adminId,
+          adminUsername: profile.email,
+        };
+
+        await saveSession(session);
+        set({ session, pairedAdmin: profile, authError: null, isBootstrapping: false });
+        return true;
+      } catch (error) {
+        console.error('[Store] Admin login failed:', error);
+        return false;
+      }
+    },
+
+    hasPairedAdmin: () => {
+      return !!get().pairedAdmin;
+    },
+
+    loginCashier: async (cashierId: string, pin: string) => {
+      const pairedAdmin = requirePairedAdmin();
+      const cashier = await loadCashier(pairedAdmin.adminId, cashierId);
+
+      if (!cashier) {
+        return false;
+      }
+
+      const valid = await verifyPin(pin, cashier.pinHash);
+      if (!valid) {
+        return false;
+      }
+
       const session: Session = {
         role: 'cashier',
+        adminId: pairedAdmin.adminId,
         cashierId: cashier.cashierId,
         cashierName: cashier.name,
       };
+
       await saveSession(session);
-      set({ session });
-      console.log('[Store] Cashier logged in:', cashier.name);
-    }
-    return valid;
-  },
+      set({ session, cart: [], currentEventId: null });
+      return true;
+    },
 
-  logout: async () => {
-    await saveSession(null);
-    set({ session: null, cart: [], currentEventId: null });
-    console.log('[Store] Logged out');
-  },
+    logout: async () => {
+      await saveSession(null);
+      set({ session: null, cart: [], currentEventId: null });
+    },
 
-  createEvent: async (name: string) => {
-    const { db } = get();
-    const eventId = generateId();
-    const now = Date.now();
-    const event: POSEvent = {
-      eventId,
-      name,
-      startTime: now,
-      status: 'draft',
-      createdAt: now,
-      createdBy: 'admin',
-      items: {},
-      orders: {},
-      stats: createEmptyStats(),
-    };
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: { ...db.events, [eventId]: event },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: now, type: 'event_created', meta: { eventId, name } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Event created:', name);
-    return eventId;
-  },
+    unpairDevice: async () => {
+      await saveSession(null);
+      resetAuthState(null);
+      await signOut(auth);
+    },
 
-  updateEventStatus: async (eventId: string, status: EventStatus) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) throw new Error('Event not found');
+    createEvent: async (name: string) => {
+      const pairedAdmin = requireAdminSession();
+      const eventId = generateId();
+      const now = Date.now();
+      const event = {
+        eventId,
+        name,
+        startTime: now,
+        status: 'draft' as const,
+        createdAt: now,
+        createdBy: pairedAdmin.adminId,
+        stats: createEmptyStats(),
+      };
 
-    const updates: Partial<POSEvent> = { status };
-    if (status === 'closed') {
-      updates.endTime = Date.now();
-    }
+      const auditEntry = buildAuditEntry('event_created', { eventId, name }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.set(eventDocRef(pairedAdmin.adminId, eventId), event);
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+      return eventId;
+    },
 
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: {
-        ...db.events,
-        [eventId]: { ...event, ...updates },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'event_status_changed', meta: { eventId, from: event.status, to: status } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Event status changed:', event.name, '->', status);
-  },
+    updateEventStatus: async (eventId: string, status: EventStatus) => {
+      const pairedAdmin = requireAdminSession();
+      const eventSnapshot = await getDoc(eventDocRef(pairedAdmin.adminId, eventId));
+      if (!eventSnapshot.exists()) {
+        throw new Error('Event not found');
+      }
 
-  deleteEvent: async (eventId: string) => {
-    const { db } = get();
-    const { [eventId]: _, ...remainingEvents } = db.events;
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: remainingEvents,
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'event_deleted', meta: { eventId } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-  },
+      const currentStatus =
+        eventSnapshot.data().status === 'live' ||
+        eventSnapshot.data().status === 'paused' ||
+        eventSnapshot.data().status === 'closed'
+          ? eventSnapshot.data().status
+          : 'draft';
 
-  addItem: async (eventId: string, name: string, priceCents: number, qty: number) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) throw new Error('Event not found');
+      const now = Date.now();
+      const updates: Record<string, unknown> = { status };
+      if (status === 'closed') {
+        updates.endTime = now;
+      }
 
-    const itemId = generateId();
-    const now = Date.now();
-    const item: EventItem = {
-      itemId,
-      name,
-      price: priceCents,
-      qtyRemaining: qty,
-      createdAt: now,
-      updatedAt: now,
-    };
+      const auditEntry = buildAuditEntry('event_status_changed', { eventId, from: currentStatus, to: status }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.update(eventDocRef(pairedAdmin.adminId, eventId), updates);
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
 
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: {
-        ...db.events,
-        [eventId]: {
-          ...event,
-          items: { ...event.items, [itemId]: item },
-        },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: now, type: 'item_added', meta: { eventId, itemId, name, priceCents, qty } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Item added:', name);
-    return itemId;
-  },
+    deleteEvent: async (eventId: string) => {
+      const pairedAdmin = requireAdminSession();
+      const [itemsSnapshot, ordersSnapshot] = await Promise.all([
+        getDocs(eventItemsCollectionRef(pairedAdmin.adminId, eventId)),
+        getDocs(eventOrdersCollectionRef(pairedAdmin.adminId, eventId)),
+      ]);
 
-  restockItem: async (eventId: string, itemId: string, additionalQty: number) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) throw new Error('Event not found');
-    const item = event.items[itemId];
-    if (!item) throw new Error('Item not found');
+      const auditEntry = buildAuditEntry('event_deleted', { eventId });
+      const batch = writeBatch(firestoreDb);
+      itemsSnapshot.docs.forEach((itemDoc) => batch.delete(itemDoc.ref));
+      ordersSnapshot.docs.forEach((orderDoc) => batch.delete(orderDoc.ref));
+      batch.delete(eventDocRef(pairedAdmin.adminId, eventId));
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
 
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: {
-        ...db.events,
-        [eventId]: {
-          ...event,
-          items: {
-            ...event.items,
-            [itemId]: {
-              ...item,
-              qtyRemaining: item.qtyRemaining + additionalQty,
-              updatedAt: Date.now(),
-            },
-          },
-        },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'item_restocked', meta: { eventId, itemId, additionalQty } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Item restocked:', item.name, '+', additionalQty);
-  },
+    addItem: async (eventId: string, name: string, priceCents: number, qty: number) => {
+      const pairedAdmin = requireAdminSession();
+      const itemId = generateId();
+      const now = Date.now();
+      const item = {
+        itemId,
+        name,
+        price: priceCents,
+        qtyRemaining: qty,
+        createdAt: now,
+        updatedAt: now,
+      };
 
-  setItemQuantity: async (eventId: string, itemId: string, newQty: number) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) throw new Error('Event not found');
-    const item = event.items[itemId];
-    if (!item) throw new Error('Item not found');
-    if (newQty < 0) throw new Error('Quantity cannot be negative');
+      const auditEntry = buildAuditEntry('item_added', { eventId, itemId, name, priceCents, qty }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.set(eventItemDocRef(pairedAdmin.adminId, eventId, itemId), item);
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+      return itemId;
+    },
 
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: {
-        ...db.events,
-        [eventId]: {
-          ...event,
-          items: {
-            ...event.items,
-            [itemId]: {
-              ...item,
-              qtyRemaining: newQty,
-              updatedAt: Date.now(),
-            },
-          },
-        },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'item_qty_set', meta: { eventId, itemId, from: item.qtyRemaining, to: newQty } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Item qty set:', item.name, '->', newQty);
-  },
+    restockItem: async (eventId: string, itemId: string, additionalQty: number) => {
+      const pairedAdmin = requireAdminSession();
+      const now = Date.now();
+      const auditEntry = buildAuditEntry('item_restocked', { eventId, itemId, additionalQty }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.update(eventItemDocRef(pairedAdmin.adminId, eventId, itemId), {
+        qtyRemaining: increment(additionalQty),
+        updatedAt: now,
+      });
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
 
-  removeItem: async (eventId: string, itemId: string) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) throw new Error('Event not found');
-    const { [itemId]: _, ...remainingItems } = event.items;
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: {
-        ...db.events,
-        [eventId]: { ...event, items: remainingItems },
-      },
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-  },
+    setItemQuantity: async (eventId: string, itemId: string, newQty: number) => {
+      const pairedAdmin = requireAdminSession();
+      if (newQty < 0) {
+        throw new Error('Quantity cannot be negative');
+      }
 
-  createCashier: async (name: string, pin: string) => {
-    const { db } = get();
-    const cashierId = generateId();
-    const pinHash = await hashPin(pin);
-    const updatedDb: POSDatabase = {
-      ...db,
-      users: {
-        ...db.users,
-        cashiers: {
-          ...db.users.cashiers,
-          [cashierId]: { cashierId, name, pinHash, createdAt: Date.now() },
-        },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'cashier_created', meta: { cashierId, name } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Cashier created:', name);
-    return cashierId;
-  },
+      const itemSnapshot = await getDoc(eventItemDocRef(pairedAdmin.adminId, eventId, itemId));
+      if (!itemSnapshot.exists()) {
+        throw new Error('Item not found');
+      }
 
-  setDefaultPaymentMethod: async (eventId: string, method: PaymentMethod | undefined) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) throw new Error('Event not found');
+      const previousQty =
+        typeof itemSnapshot.data().qtyRemaining === 'number' ? itemSnapshot.data().qtyRemaining : 0;
+      const now = Date.now();
+      const auditEntry = buildAuditEntry('item_qty_set', { eventId, itemId, from: previousQty, to: newQty }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.update(eventItemDocRef(pairedAdmin.adminId, eventId, itemId), {
+        qtyRemaining: newQty,
+        updatedAt: now,
+      });
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
 
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: {
-        ...db.events,
-        [eventId]: {
-          ...event,
-          defaultPaymentMethod: method,
-        },
-      },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'default_payment_set', meta: { eventId, method } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Default payment set:', method);
-  },
+    removeItem: async (eventId: string, itemId: string) => {
+      const pairedAdmin = requireAdminSession();
+      const itemSnapshot = await getDoc(eventItemDocRef(pairedAdmin.adminId, eventId, itemId));
+      if (!itemSnapshot.exists()) {
+        throw new Error('Item not found');
+      }
 
-  removeCashier: async (cashierId: string) => {
-    const { db } = get();
-    const { [cashierId]: _, ...remaining } = db.users.cashiers;
-    const updatedDb: POSDatabase = {
-      ...db,
-      users: { ...db.users, cashiers: remaining },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'cashier_removed', meta: { cashierId } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-  },
+      const itemName = typeof itemSnapshot.data().name === 'string' ? itemSnapshot.data().name : itemId;
+      const auditEntry = buildAuditEntry('item_removed', { eventId, itemId, name: itemName });
+      const batch = writeBatch(firestoreDb);
+      batch.delete(eventItemDocRef(pairedAdmin.adminId, eventId, itemId));
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
 
-  setCurrentEvent: (eventId: string | null) => {
-    set({ currentEventId: eventId, cart: [] });
-  },
+    setDefaultPaymentMethod: async (eventId: string, method: PaymentMethod | undefined) => {
+      const pairedAdmin = requireAdminSession();
+      const now = Date.now();
+      const auditEntry = buildAuditEntry('default_payment_set', { eventId, method }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.update(eventDocRef(pairedAdmin.adminId, eventId), {
+        defaultPaymentMethod: method ?? deleteField(),
+      });
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
 
-  addToCart: (line: CartLine) => {
-    const { cart } = get();
-    if (line.type === 'inventory' && line.itemId) {
-      const existingIndex = cart.findIndex(
-        (l) => l.type === 'inventory' && l.itemId === line.itemId
-      );
-      if (existingIndex >= 0) {
-        const existing = cart[existingIndex];
-        const maxQty = existing.maxQty ?? Infinity;
-        if (existing.qty >= maxQty) return;
-        const updated = [...cart];
-        updated[existingIndex] = { ...existing, qty: existing.qty + 1 };
-        set({ cart: updated });
+    createCashier: async (name: string, pin: string) => {
+      const pairedAdmin = requireAdminSession();
+      const cashierId = generateId();
+      const pinHash = await hashPin(pin);
+      const now = Date.now();
+      const auditEntry = buildAuditEntry('cashier_created', { cashierId, name }, now);
+      const batch = writeBatch(firestoreDb);
+      batch.set(cashierDocRef(pairedAdmin.adminId, cashierId), {
+        cashierId,
+        name,
+        pinHash,
+        createdAt: now,
+      });
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+      return cashierId;
+    },
+
+    removeCashier: async (cashierId: string) => {
+      const pairedAdmin = requireAdminSession();
+      const auditEntry = buildAuditEntry('cashier_removed', { cashierId });
+      const batch = writeBatch(firestoreDb);
+      batch.delete(cashierDocRef(pairedAdmin.adminId, cashierId));
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
+    },
+
+    setCurrentEvent: (eventId: string | null) => {
+      set({ currentEventId: eventId, cart: [] });
+    },
+
+    addToCart: (line: CartLine) => {
+      const { cart } = get();
+      if (line.type === 'inventory' && line.itemId) {
+        const existingIndex = cart.findIndex(
+          (cartLine) => cartLine.type === 'inventory' && cartLine.itemId === line.itemId
+        );
+
+        if (existingIndex >= 0) {
+          const existing = cart[existingIndex];
+          const maxQty = existing.maxQty ?? Infinity;
+          if (existing.qty >= maxQty) return;
+
+          const updated = [...cart];
+          updated[existingIndex] = { ...existing, qty: existing.qty + 1 };
+          set({ cart: updated });
+          return;
+        }
+      }
+
+      set({ cart: [...cart, { ...line }] });
+    },
+
+    incrementCartLine: (index: number) => {
+      const { cart } = get();
+      const line = cart[index];
+      if (!line) return;
+      if (line.type === 'inventory' && line.maxQty !== undefined && line.qty >= line.maxQty) return;
+
+      const updated = [...cart];
+      updated[index] = { ...line, qty: line.qty + 1 };
+      set({ cart: updated });
+    },
+
+    decrementCartLine: (index: number) => {
+      const { cart } = get();
+      const line = cart[index];
+      if (!line) return;
+
+      if (line.qty <= 1) {
+        set({ cart: cart.filter((_, cartIndex) => cartIndex !== index) });
         return;
       }
-    }
-    set({ cart: [...cart, { ...line, qty: 1 }] });
-  },
 
-  incrementCartLine: (index: number) => {
-    const { cart } = get();
-    const line = cart[index];
-    if (!line) return;
-    if (line.type === 'inventory' && line.maxQty !== undefined && line.qty >= line.maxQty) return;
-    const updated = [...cart];
-    updated[index] = { ...line, qty: line.qty + 1 };
-    set({ cart: updated });
-  },
-
-  decrementCartLine: (index: number) => {
-    const { cart } = get();
-    const line = cart[index];
-    if (!line) return;
-    if (line.qty <= 1) {
-      set({ cart: cart.filter((_, i) => i !== index) });
-    } else {
       const updated = [...cart];
       updated[index] = { ...line, qty: line.qty - 1 };
       set({ cart: updated });
-    }
-  },
+    },
 
-  removeCartLine: (index: number) => {
-    const { cart } = get();
-    set({ cart: cart.filter((_, i) => i !== index) });
-  },
+    removeCartLine: (index: number) => {
+      const { cart } = get();
+      set({ cart: cart.filter((_, cartIndex) => cartIndex !== index) });
+    },
 
-  clearCart: () => {
-    set({ cart: [] });
-  },
+    clearCart: () => {
+      set({ cart: [] });
+    },
 
-  commitOrder: async (paymentMethod: PaymentMethod, cashReceivedCents?: number) => {
-    if (commitLock) {
-      throw new Error('An order is already being processed. Please wait.');
-    }
-    commitLock = true;
-
-    try {
-      const { db, session, cart, currentEventId } = get();
-
-      if (!session || session.role !== 'cashier' || !session.cashierId) {
-        throw new Error('Not authorized to place orders');
+    commitOrder: async (paymentMethod: PaymentMethod, cashReceivedCents?: number) => {
+      if (commitLock) {
+        throw new Error('An order is already being processed. Please wait.');
       }
-      if (!currentEventId) throw new Error('No event selected');
-      if (cart.length === 0) throw new Error('Cart is empty');
+      commitLock = true;
 
-      const event = db.events[currentEventId];
-      if (!event) throw new Error('Event not found');
-      if (event.status !== 'live') throw new Error('Event is not currently live');
+      try {
+        const pairedAdmin = requirePairedAdmin();
+        const { session, cart, currentEventId } = get();
 
-      for (const line of cart) {
-        if (line.type === 'inventory' && line.itemId) {
-          const item = event.items[line.itemId];
-          if (!item) throw new Error(`Item "${line.name}" no longer exists`);
-          if (item.qtyRemaining < line.qty) {
-            throw new Error(`Not enough "${line.name}" in stock (${item.qtyRemaining} remaining)`);
+        if (!session || session.role !== 'cashier' || session.adminId !== pairedAdmin.adminId || !session.cashierId) {
+          throw new Error('Cashier login required.');
+        }
+        if (!currentEventId) throw new Error('No event selected.');
+        if (cart.length === 0) throw new Error('Cart is empty.');
+
+        const subtotal = cart.reduce((sum, line) => sum + line.unitPrice * line.qty, 0);
+        const total = subtotal;
+
+        if (paymentMethod === 'cash' && (cashReceivedCents === undefined || cashReceivedCents < total)) {
+          throw new Error('Cash received must cover the order total.');
+        }
+
+        const now = Date.now();
+        const orderId = generateId();
+        const changeGiven = paymentMethod === 'cash' ? (cashReceivedCents ?? 0) - total : undefined;
+        const orderLines: OrderLine[] = cart.map((line) => ({
+          type: line.type,
+          itemId: line.itemId,
+          nameAtSale: line.name,
+          unitPriceAtSale: line.unitPrice,
+          qty: line.qty,
+          lineTotal: line.unitPrice * line.qty,
+          reason: line.reason,
+        }));
+
+        const order: Order = {
+          orderId,
+          createdAt: now,
+          cashierId: session.cashierId,
+          status: 'completed',
+          paymentMethod,
+          cashReceived: paymentMethod === 'cash' ? cashReceivedCents : undefined,
+          changeGiven,
+          subtotal,
+          total,
+          lines: orderLines,
+        };
+
+        const inventoryLines = cart.filter(
+          (line): line is CartLine & { itemId: string } => line.type === 'inventory' && !!line.itemId
+        );
+
+        let updatedStats = createEmptyStats();
+        const updatedItemQuantities: Record<string, number> = {};
+
+        await runTransaction(firestoreDb, async (transaction) => {
+          const eventReference = eventDocRef(pairedAdmin.adminId, currentEventId);
+          const eventSnapshot = await transaction.get(eventReference);
+
+          if (!eventSnapshot.exists()) {
+            throw new Error('Event not found.');
           }
-        }
-      }
 
-      const orderId = generateId();
-      const now = Date.now();
+          const eventData = eventSnapshot.data() as Record<string, unknown>;
+          if (eventData.status !== 'live') {
+            throw new Error('Event is not currently live.');
+          }
 
-      const subtotal = cart.reduce((sum, l) => sum + l.unitPrice * l.qty, 0);
-      const total = subtotal;
+          const itemSnapshots = await Promise.all(
+            inventoryLines.map((line) =>
+              transaction.get(eventItemDocRef(pairedAdmin.adminId, currentEventId, line.itemId))
+            )
+          );
 
-      const orderLines: OrderLine[] = cart.map((l) => ({
-        type: l.type,
-        itemId: l.itemId,
-        nameAtSale: l.name,
-        unitPriceAtSale: l.unitPrice,
-        qty: l.qty,
-        lineTotal: l.unitPrice * l.qty,
-        reason: l.reason,
-      }));
+          itemSnapshots.forEach((itemSnapshot, index) => {
+            if (!itemSnapshot.exists()) {
+              throw new Error(`Item "${inventoryLines[index]?.name}" no longer exists.`);
+            }
 
-      let changeGiven: number | undefined;
-      if (paymentMethod === 'cash' && cashReceivedCents !== undefined) {
-        changeGiven = cashReceivedCents - total;
-      }
+            const itemData = itemSnapshot.data() as Record<string, unknown>;
+            const qtyRemaining =
+              typeof itemData.qtyRemaining === 'number' && Number.isFinite(itemData.qtyRemaining)
+                ? itemData.qtyRemaining
+                : 0;
 
-      const order: Order = {
-        orderId,
-        createdAt: now,
-        cashierId: session.cashierId,
-        status: 'completed',
-        paymentMethod,
-        cashReceived: cashReceivedCents,
-        changeGiven,
-        subtotal,
-        total,
-        lines: orderLines,
-      };
+            if (qtyRemaining < inventoryLines[index].qty) {
+              throw new Error(`Not enough "${inventoryLines[index].name}" in stock (${qtyRemaining} remaining).`);
+            }
+          });
 
-      const updatedItems = { ...event.items };
-      for (const line of cart) {
-        if (line.type === 'inventory' && line.itemId && updatedItems[line.itemId]) {
-          const item = updatedItems[line.itemId];
-          updatedItems[line.itemId] = {
-            ...item,
-            qtyRemaining: item.qtyRemaining - line.qty,
-            updatedAt: now,
+          itemSnapshots.forEach((itemSnapshot, index) => {
+            const itemData = itemSnapshot.data() as Record<string, unknown>;
+            const qtyRemaining = typeof itemData.qtyRemaining === 'number' ? itemData.qtyRemaining : 0;
+            const nextQty = qtyRemaining - inventoryLines[index].qty;
+            updatedItemQuantities[inventoryLines[index].itemId] = nextQty;
+            transaction.update(itemSnapshot.ref, {
+              qtyRemaining: nextQty,
+              updatedAt: now,
+            });
+          });
+
+          const baseStats = createEmptyStats();
+          const eventStats = ((eventData.stats ?? {}) as Record<string, unknown>) || {};
+          const revenueByPayment = ((eventStats.revenueByPayment ?? {}) as Record<string, unknown>) || {};
+          const qtySoldByItemId = { ...(eventStats.qtySoldByItemId as Record<string, number> | undefined) };
+
+          inventoryLines.forEach((line) => {
+            qtySoldByItemId[line.itemId] = (qtySoldByItemId[line.itemId] || 0) + line.qty;
+          });
+
+          updatedStats = {
+            totalRevenue:
+              (typeof eventStats.totalRevenue === 'number' ? eventStats.totalRevenue : baseStats.totalRevenue) + total,
+            totalOrders:
+              (typeof eventStats.totalOrders === 'number' ? eventStats.totalOrders : baseStats.totalOrders) + 1,
+            revenueByPayment: {
+              cash: typeof revenueByPayment.cash === 'number' ? revenueByPayment.cash : baseStats.revenueByPayment.cash,
+              card: typeof revenueByPayment.card === 'number' ? revenueByPayment.card : baseStats.revenueByPayment.card,
+              mobile:
+                typeof revenueByPayment.mobile === 'number'
+                  ? revenueByPayment.mobile
+                  : baseStats.revenueByPayment.mobile,
+              comp: typeof revenueByPayment.comp === 'number' ? revenueByPayment.comp : baseStats.revenueByPayment.comp,
+              [paymentMethod]:
+                (typeof revenueByPayment[paymentMethod] === 'number'
+                  ? (revenueByPayment[paymentMethod] as number)
+                  : 0) + total,
+            },
+            qtySoldByItemId,
+            lastUpdatedAt: now,
           };
-        }
+
+          const auditEntry = buildAuditEntry(
+            'order_created',
+            {
+              orderId,
+              eventId: currentEventId,
+              total,
+              paymentMethod,
+              cashierId: session.cashierId,
+            },
+            now
+          );
+
+          transaction.set(eventOrderDocRef(pairedAdmin.adminId, currentEventId, orderId), order);
+          transaction.update(eventReference, { stats: updatedStats });
+          transaction.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+        });
+
+        set({ cart: [] });
+        return {
+          order,
+          updatedStats,
+          updatedItemQuantities,
+        };
+      } finally {
+        commitLock = false;
+      }
+    },
+
+    getCartTotal: () => {
+      return get().cart.reduce((sum, line) => sum + line.unitPrice * line.qty, 0);
+    },
+
+    getCartItemCount: () => {
+      return get().cart.reduce((sum, line) => sum + line.qty, 0);
+    },
+
+    getEventExportJSON: async (eventId: string) => {
+      const pairedAdmin = requireAdminSession();
+      const event = await fetchEventDetail(pairedAdmin.adminId, eventId, { includeOrders: true });
+      if (!event) return null;
+
+      return JSON.stringify(
+        {
+          exportedAt: Date.now(),
+          schemaVersion: 2,
+          event,
+        },
+        null,
+        2
+      );
+    },
+
+    importEventFromJSON: async (json: string) => {
+      const pairedAdmin = requireAdminSession();
+      const parsed = JSON.parse(json) as { event?: POSEvent };
+      const eventData = parsed.event;
+
+      if (!eventData?.eventId) {
+        throw new Error('Invalid event data.');
       }
 
-      const updatedStats = {
-        totalRevenue: event.stats.totalRevenue + total,
-        totalOrders: event.stats.totalOrders + 1,
-        revenueByPayment: {
-          ...event.stats.revenueByPayment,
-          [paymentMethod]: (event.stats.revenueByPayment[paymentMethod] || 0) + total,
-        },
-        qtySoldByItemId: { ...event.stats.qtySoldByItemId },
-        lastUpdatedAt: now,
-      };
+      const newEventId = generateId();
+      const now = Date.now();
+      const batch = writeBatch(firestoreDb);
 
-      for (const line of cart) {
-        if (line.type === 'inventory' && line.itemId) {
-          updatedStats.qtySoldByItemId[line.itemId] =
-            (updatedStats.qtySoldByItemId[line.itemId] || 0) + line.qty;
-        }
-      }
+      batch.set(eventDocRef(pairedAdmin.adminId, newEventId), {
+        eventId: newEventId,
+        name: `${eventData.name} (imported)`,
+        startTime: eventData.startTime,
+        endTime: eventData.endTime ?? now,
+        status: 'closed',
+        createdAt: now,
+        createdBy: pairedAdmin.adminId,
+        defaultPaymentMethod: eventData.defaultPaymentMethod ?? null,
+        stats: eventData.stats ?? createEmptyStats(),
+      });
 
-      const updatedDb: POSDatabase = {
-        ...db,
-        events: {
-          ...db.events,
-          [currentEventId]: {
-            ...event,
-            items: updatedItems,
-            orders: { ...event.orders, [orderId]: order },
-            stats: updatedStats,
-          },
-        },
-        auditLog: [
-          ...db.auditLog,
-          {
-            id: generateId(),
-            ts: now,
-            type: 'order_created',
-            meta: { orderId, eventId: currentEventId, total, paymentMethod, cashierId: session.cashierId },
-          },
-        ],
-      };
+      Object.values(eventData.items ?? {}).forEach((item) => {
+        batch.set(eventItemDocRef(pairedAdmin.adminId, newEventId, item.itemId), item);
+      });
 
-      await saveDB(updatedDb);
-      set({ db: updatedDb, cart: [] });
+      Object.values(eventData.orders ?? {}).forEach((order) => {
+        batch.set(eventOrderDocRef(pairedAdmin.adminId, newEventId, order.orderId), order);
+      });
 
-      console.log('[Store] Order committed:', orderId, 'Total:', total);
-      return order;
-    } finally {
-      commitLock = false;
-    }
-  },
+      const auditEntry = buildAuditEntry(
+        'event_imported',
+        { originalId: eventData.eventId, newId: newEventId },
+        now
+      );
+      batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
+      await batch.commit();
 
-  getEvent: (eventId: string) => {
-    return get().db.events[eventId];
-  },
-
-  getLiveEvents: () => {
-    const { db } = get();
-    return Object.values(db.events).filter((e) => e.status === 'live');
-  },
-
-  getCartTotal: () => {
-    const { cart } = get();
-    return cart.reduce((sum, l) => sum + l.unitPrice * l.qty, 0);
-  },
-
-  getCartItemCount: () => {
-    const { cart } = get();
-    return cart.reduce((sum, l) => sum + l.qty, 0);
-  },
-
-  getEventExportJSON: (eventId: string) => {
-    const { db } = get();
-    const event = db.events[eventId];
-    if (!event) return null;
-    const exportData = {
-      exportedAt: Date.now(),
-      schemaVersion: db.schemaVersion,
-      event,
-    };
-    return JSON.stringify(exportData, null, 2);
-  },
-
-  importEventFromJSON: async (json: string) => {
-    const { db } = get();
-    const parsed = JSON.parse(json);
-    const eventData = parsed.event as POSEvent;
-    if (!eventData || !eventData.eventId) {
-      throw new Error('Invalid event data');
-    }
-
-    const newEventId = generateId();
-    const importedEvent: POSEvent = {
-      ...eventData,
-      eventId: newEventId,
-      name: `${eventData.name} (imported)`,
-      status: 'closed' as const,
-    };
-
-    const updatedDb: POSDatabase = {
-      ...db,
-      events: { ...db.events, [newEventId]: importedEvent },
-      auditLog: [
-        ...db.auditLog,
-        { id: generateId(), ts: Date.now(), type: 'event_imported', meta: { originalId: eventData.eventId, newId: newEventId } },
-      ],
-    };
-    await saveDB(updatedDb);
-    set({ db: updatedDb });
-    console.log('[Store] Event imported as:', newEventId);
-    return newEventId;
-  },
-}));
+      return newEventId;
+    },
+  };
+});
