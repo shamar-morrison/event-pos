@@ -1,8 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,6 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Stack, useRouter } from 'expo-router';
 import { Banknote, CreditCard, Gift, Smartphone } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Colors, { getPaymentColor } from '@/constants/colors';
 import { posKeys, useCashierEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
@@ -27,9 +26,14 @@ const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; Icon: typeof Banknot
   { key: 'comp', label: 'Comp', Icon: Gift },
 ];
 
+const CASH_INPUT_MARGIN = 20;
+const CONTENT_PADDING = 20;
+const BUTTON_BOTTOM_PADDING = 20;
+
 export default function CheckoutScreen() {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const insets = useSafeAreaInsets();
   const pairedAdmin = usePosStore((state) => state.pairedAdmin);
   const cart = usePosStore((state) => state.cart);
   const currentEventId = usePosStore((state) => state.currentEventId);
@@ -37,6 +41,10 @@ export default function CheckoutScreen() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [cashReceived, setCashReceived] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const cashInputRef = useRef<TextInput | null>(null);
+  const focusedInputRef = useRef<TextInput | null>(null);
+  const dismissInProgressRef = useRef(false);
 
   const { data: event, isLoading } = useCashierEventDetail(pairedAdmin?.adminId, currentEventId);
   const total = useMemo(
@@ -46,6 +54,24 @@ export default function CheckoutScreen() {
   const cashReceivedCents = parseDollarInput(cashReceived);
   const changeDue =
     paymentMethod === 'cash' && cashReceivedCents !== null ? cashReceivedCents - total : null;
+  const activeEventHref = currentEventId
+    ? { pathname: '/cashier/[eventId]' as const, params: { eventId: currentEventId } }
+    : '/cashier';
+  const invalidDismissHref = currentEventId && event ? activeEventHref : '/cashier';
+  const bottomInset = Math.max(insets.bottom, 16);
+
+  const ensureInputVisible = useCallback((input: TextInput | null) => {
+    if (!input || !scrollViewRef.current) return;
+
+    requestAnimationFrame(() => {
+      const scrollResponder = scrollViewRef.current?.getScrollResponder();
+      if (!scrollResponder || typeof scrollResponder.scrollResponderScrollNativeHandleToKeyboard !== 'function') {
+        return;
+      }
+
+      scrollResponder.scrollResponderScrollNativeHandleToKeyboard(input, CASH_INPUT_MARGIN, true);
+    });
+  }, []);
 
   useEffect(() => {
     if (event?.defaultPaymentMethod) {
@@ -57,10 +83,24 @@ export default function CheckoutScreen() {
   }, [event?.defaultPaymentMethod]);
 
   useEffect(() => {
-    if (!isLoading && !submitting && (!event || cart.length === 0)) {
-      void router.back();
+    if (isLoading || submitting || dismissInProgressRef.current) return;
+    if (event && currentEventId && cart.length > 0) return;
+
+    dismissInProgressRef.current = true;
+    router.dismissTo(invalidDismissHref);
+  }, [cart.length, currentEventId, event, invalidDismissHref, isLoading, router, submitting]);
+
+  useEffect(() => {
+    if (!isLoading && event && cart.length > 0) {
+      dismissInProgressRef.current = false;
     }
-  }, [cart.length, event, isLoading, router, submitting]);
+  }, [cart.length, event, isLoading]);
+
+  useEffect(() => {
+    if (paymentMethod !== 'cash') {
+      focusedInputRef.current = null;
+    }
+  }, [paymentMethod]);
 
   const handleSubmit = async () => {
     if (!event) return;
@@ -111,7 +151,8 @@ export default function CheckoutScreen() {
           ? `Change due: ${formatMoney(result.order.changeGiven)}`
           : 'The order has been saved.'
       );
-      router.back();
+      dismissInProgressRef.current = true;
+      router.dismissTo(activeEventHref);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to complete order.';
       Alert.alert('Checkout Error', message);
@@ -137,13 +178,19 @@ export default function CheckoutScreen() {
     );
   }
 
+  const disableSubmit =
+    submitting || (paymentMethod === 'cash' && (cashReceivedCents === null || cashReceivedCents < total));
+
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
+    <View style={styles.container}>
       <Stack.Screen options={{ title: 'Checkout' }} />
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.scrollView}
+        contentContainerStyle={[styles.scroll, { paddingBottom: bottomInset + BUTTON_BOTTOM_PADDING }]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View style={styles.summaryCard}>
           <Text style={styles.summaryLabel}>Event</Text>
           <Text style={styles.summaryTitle}>{event.name}</Text>
@@ -194,12 +241,22 @@ export default function CheckoutScreen() {
           <View style={styles.sectionCard}>
             <Text style={styles.cashLabel}>Cash Received</Text>
             <TextInput
+              ref={cashInputRef}
               style={styles.cashInput}
               value={cashReceived}
               onChangeText={setCashReceived}
               placeholder="0.00"
               placeholderTextColor={Colors.textMuted}
               keyboardType="decimal-pad"
+              onFocus={() => {
+                focusedInputRef.current = cashInputRef.current;
+                ensureInputVisible(cashInputRef.current);
+              }}
+              onBlur={() => {
+                if (focusedInputRef.current === cashInputRef.current) {
+                  focusedInputRef.current = null;
+                }
+              }}
             />
 
             <View style={styles.cashRow}>
@@ -228,22 +285,23 @@ export default function CheckoutScreen() {
           </View>
         ) : null}
 
-        <TouchableOpacity
-          style={[
-            styles.submitButton,
-            (submitting || (paymentMethod === 'cash' && (cashReceivedCents === null || cashReceivedCents < total))) &&
-              styles.submitButtonDisabled,
-          ]}
-          onPress={handleSubmit}
-          disabled={submitting || (paymentMethod === 'cash' && (cashReceivedCents === null || cashReceivedCents < total))}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.submitButtonText}>
-            {submitting ? 'Completing Order...' : `Complete Sale • ${formatMoney(total)}`}
-          </Text>
-        </TouchableOpacity>
+        <View style={styles.buttonSection}>
+          <TouchableOpacity
+            style={[
+              styles.submitButton,
+              disableSubmit && styles.submitButtonDisabled,
+            ]}
+            onPress={handleSubmit}
+            disabled={disableSubmit}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.submitButtonText}>
+              {submitting ? 'Completing Order...' : `Complete Sale • ${formatMoney(total)}`}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </ScrollView>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -262,9 +320,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Colors.textSecondary,
   },
+  scrollView: {
+    flex: 1,
+  },
   scroll: {
-    padding: 20,
-    paddingBottom: 40,
+    paddingHorizontal: CONTENT_PADDING,
+    paddingTop: CONTENT_PADDING,
+    flexGrow: 1,
   },
   summaryCard: {
     backgroundColor: Colors.card,
@@ -390,11 +452,17 @@ const styles = StyleSheet.create({
   cashShort: {
     color: Colors.danger,
   },
+  buttonSection: {
+    marginTop: 'auto',
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
   submitButton: {
     backgroundColor: Colors.primary,
     borderRadius: 16,
     paddingVertical: 18,
     alignItems: 'center',
+    width: '100%',
   },
   submitButtonDisabled: {
     opacity: 0.45,

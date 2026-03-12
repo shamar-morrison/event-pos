@@ -38,7 +38,7 @@ export default function CashierLayout() {
     >
       <Stack.Screen name="index" options={{ title: 'Events', headerShown: false }} />
       <Stack.Screen name="[eventId]" options={{ title: 'POS' }} />
-      <Stack.Screen name="checkout" options={{ title: 'Checkout', presentation: 'modal' }} />
+      <Stack.Screen name="checkout" options={{ title: 'Checkout', presentation: 'card' }} />
     </Stack>
   );
 }

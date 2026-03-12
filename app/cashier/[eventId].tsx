@@ -9,8 +9,6 @@ import {
   TextInput,
   Alert,
   Dimensions,
-  KeyboardAvoidingView,
-  Platform,
   ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
@@ -24,10 +22,10 @@ import {
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
+import KeyboardSafeModal from '@/components/KeyboardSafeModal';
 import { useCashierEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney, parseDollarInput } from '@/utils/money';
-import type { CartLine } from '@/types/pos';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_COLS = SCREEN_WIDTH > 500 ? 3 : 2;
@@ -52,6 +50,7 @@ export default function POSScreen() {
   const [manualPrice, setManualPrice] = useState('');
   const [manualQty, setManualQty] = useState('1');
   const [manualReason, setManualReason] = useState('');
+  const manualNameInputRef = React.useRef<TextInput | null>(null);
 
   React.useEffect(() => {
     if (eventId) {
@@ -286,56 +285,59 @@ export default function POSScreen() {
         </View>
       </Modal>
 
-      <Modal visible={showManual} animationType="slide" transparent>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.manualModal}>
-            <View style={styles.cartModalHeader}>
-              <Text style={styles.cartModalTitle}>Custom Item</Text>
-              <TouchableOpacity onPress={() => setShowManual(false)}>
-                <X size={24} color={Colors.textSecondary} />
-              </TouchableOpacity>
-            </View>
-            <View style={styles.manualForm}>
-              <TextInput
-                style={styles.input}
-                value={manualName}
-                onChangeText={setManualName}
-                placeholder="Item name"
-                placeholderTextColor={Colors.textMuted}
-                autoFocus
-              />
-              <View style={styles.manualRow}>
-                <TextInput
-                  style={[styles.input, { flex: 1 }]}
-                  value={manualPrice}
-                  onChangeText={setManualPrice}
-                  placeholder="Price ($)"
-                  placeholderTextColor={Colors.textMuted}
-                  keyboardType="decimal-pad"
-                />
-                <TextInput
-                  style={[styles.input, { width: 80 }]}
-                  value={manualQty}
-                  onChangeText={setManualQty}
-                  placeholder="Qty"
-                  placeholderTextColor={Colors.textMuted}
-                  keyboardType="number-pad"
-                />
-              </View>
-              <TextInput
-                style={styles.input}
-                value={manualReason}
-                onChangeText={setManualReason}
-                placeholder="Reason (required)"
-                placeholderTextColor={Colors.textMuted}
-              />
-              <TouchableOpacity style={styles.submitBtn} onPress={handleAddManual}>
-                <Text style={styles.submitBtnText}>Add to Cart</Text>
-              </TouchableOpacity>
-            </View>
+      <KeyboardSafeModal
+        visible={showManual}
+        onRequestClose={() => setShowManual(false)}
+        animationType="slide"
+        variant="centered"
+        initialFocusRef={manualNameInputRef}
+        contentStyle={styles.manualModal}
+      >
+        <View style={styles.cartModalHeader}>
+          <Text style={styles.cartModalTitle}>Custom Item</Text>
+          <TouchableOpacity onPress={() => setShowManual(false)}>
+            <X size={24} color={Colors.textSecondary} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.manualForm}>
+          <TextInput
+            ref={manualNameInputRef}
+            style={styles.input}
+            value={manualName}
+            onChangeText={setManualName}
+            placeholder="Item name"
+            placeholderTextColor={Colors.textMuted}
+          />
+          <View style={styles.manualRow}>
+            <TextInput
+              style={[styles.input, { flex: 1 }]}
+              value={manualPrice}
+              onChangeText={setManualPrice}
+              placeholder="Price ($)"
+              placeholderTextColor={Colors.textMuted}
+              keyboardType="decimal-pad"
+            />
+            <TextInput
+              style={[styles.input, { width: 80 }]}
+              value={manualQty}
+              onChangeText={setManualQty}
+              placeholder="Qty"
+              placeholderTextColor={Colors.textMuted}
+              keyboardType="number-pad"
+            />
           </View>
-        </KeyboardAvoidingView>
-      </Modal>
+          <TextInput
+            style={styles.input}
+            value={manualReason}
+            onChangeText={setManualReason}
+            placeholder="Reason (required)"
+            placeholderTextColor={Colors.textMuted}
+          />
+          <TouchableOpacity style={styles.submitBtn} onPress={handleAddManual}>
+            <Text style={styles.submitBtnText}>Add to Cart</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardSafeModal>
     </View>
   );
 }
@@ -516,12 +518,6 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   checkoutBtnText: { fontSize: 17, fontWeight: '700' as const, color: Colors.white },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
-    padding: 24,
-  },
   manualModal: {
     backgroundColor: Colors.surface,
     borderRadius: 20,

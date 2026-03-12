@@ -123,6 +123,12 @@ function areSessionsEqual(left: Session | null, right: Session | null): boolean 
   );
 }
 
+function omitUndefined<T extends object>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, fieldValue]) => fieldValue !== undefined)
+  ) as T;
+}
+
 function buildAuditEntry(type: string, meta: Record<string, unknown>, ts = Date.now()) {
   const id = generateId();
   return {
@@ -607,28 +613,30 @@ export const usePosStore = create<PosStore>((set, get) => {
         const now = Date.now();
         const orderId = generateId();
         const changeGiven = paymentMethod === 'cash' ? (cashReceivedCents ?? 0) - total : undefined;
-        const orderLines: OrderLine[] = cart.map((line) => ({
-          type: line.type,
-          itemId: line.itemId,
-          nameAtSale: line.name,
-          unitPriceAtSale: line.unitPrice,
-          qty: line.qty,
-          lineTotal: line.unitPrice * line.qty,
-          reason: line.reason,
-        }));
+        const orderLines: OrderLine[] = cart.map((line) =>
+          omitUndefined<OrderLine>({
+            type: line.type,
+            itemId: line.type === 'inventory' ? line.itemId : undefined,
+            nameAtSale: line.name,
+            unitPriceAtSale: line.unitPrice,
+            qty: line.qty,
+            lineTotal: line.unitPrice * line.qty,
+            reason: line.type === 'manual' && line.reason?.trim() ? line.reason.trim() : undefined,
+          })
+        );
 
-        const order: Order = {
+        const order: Order = omitUndefined<Order>({
           orderId,
           createdAt: now,
           cashierId: session.cashierId,
           status: 'completed',
           paymentMethod,
           cashReceived: paymentMethod === 'cash' ? cashReceivedCents : undefined,
-          changeGiven,
+          changeGiven: paymentMethod === 'cash' ? changeGiven : undefined,
           subtotal,
           total,
           lines: orderLines,
-        };
+        });
 
         const inventoryLines = cart.filter(
           (line): line is CartLine & { itemId: string } => line.type === 'inventory' && !!line.itemId

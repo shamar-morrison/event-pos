@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,16 +7,14 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
-  Modal,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   FlatList,
-  Keyboard,
-  InputAccessoryView,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
 import { useQueryClient } from '@tanstack/react-query';
-import { useRef } from 'react';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import {
   Play,
@@ -37,7 +35,8 @@ import {
   Gift,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
-import Colors from '@/constants/colors';
+import Colors, { getPaymentColor } from '@/constants/colors';
+import KeyboardSafeModal from '@/components/KeyboardSafeModal';
 import StatusBadge from '@/components/StatusBadge';
 import EmptyState from '@/components/EmptyState';
 import { posKeys, useAdminEventDetail } from '@/hooks/use-pos-data';
@@ -45,7 +44,6 @@ import { usePosStore } from '@/store/pos-store';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 import PRESET_DRINKS, { PresetDrink } from '@/constants/preset-drinks';
 import type { EventStatus, PaymentMethod } from '@/types/pos';
-import { getPaymentColor } from '@/constants/colors';
 
 const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; IconComp: typeof Banknote }[] = [
   { key: 'cash', label: 'Cash', IconComp: Banknote },
@@ -53,6 +51,8 @@ const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; IconComp: typeof Ban
   { key: 'mobile', label: 'Mobile', IconComp: Smartphone },
   { key: 'comp', label: 'Comp', IconComp: Gift },
 ];
+
+const ADD_ITEM_INPUT_MARGIN = 20;
 
 export default function EventDetailScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
@@ -88,11 +88,78 @@ export default function EventDetailScreen() {
   const [adjustMode, setAdjustMode] = useState<'add' | 'reduce'>('add');
   const [adjustQty, setAdjustQty] = useState('');
   const scrollViewRef = useRef<ScrollView>(null);
+  const adjustQtyInputRef = useRef<TextInput | null>(null);
+  const presetSearchInputRef = useRef<TextInput | null>(null);
+  const customNameInputRef = useRef<TextInput | null>(null);
+  const customPriceInputRef = useRef<TextInput | null>(null);
+  const customQtyInputRef = useRef<TextInput | null>(null);
+  const presetPriceInputRef = useRef<TextInput | null>(null);
+  const presetQtyInputRef = useRef<TextInput | null>(null);
+  const focusedAddItemInputRef = useRef<React.RefObject<TextInput | null> | null>(null);
+  const currentScrollYRef = useRef(0);
+  const keyboardHeightRef = useRef(0);
 
   const items = useMemo(
     () => (event ? Object.values(event.items).sort((a, b) => a.name.localeCompare(b.name)) : []),
     [event]
   );
+
+  const ensureInputVisible = useCallback((input: TextInput | null) => {
+    if (Platform.OS !== 'android' || !input || !scrollViewRef.current) return;
+
+    requestAnimationFrame(() => {
+      input.measureInWindow((_, inputY, _width, inputHeight) => {
+        const viewportHeight = Dimensions.get('window').height;
+        const visibleBottom = viewportHeight - keyboardHeightRef.current - ADD_ITEM_INPUT_MARGIN;
+        const inputBottom = inputY + inputHeight;
+
+        if (inputBottom <= visibleBottom) return;
+
+        const scrollDelta = inputBottom - visibleBottom;
+        scrollViewRef.current?.scrollTo({
+          y: Math.max(0, currentScrollYRef.current + scrollDelta),
+          animated: true,
+        });
+      });
+    });
+  }, []);
+
+  const handleAddItemInputFocus = useCallback((inputRef: React.RefObject<TextInput | null>) => {
+    focusedAddItemInputRef.current = inputRef;
+    ensureInputVisible(inputRef.current);
+  }, [ensureInputVisible]);
+
+  const handleAddItemInputBlur = useCallback((inputRef: React.RefObject<TextInput | null>) => {
+    if (focusedAddItemInputRef.current === inputRef) {
+      focusedAddItemInputRef.current = null;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (Platform.OS !== 'android') return;
+
+    const showSubscription = Keyboard.addListener('keyboardDidShow', (event) => {
+      const viewportHeight = Dimensions.get('window').height;
+      const keyboardHeight = event.endCoordinates.height || Math.max(0, viewportHeight - event.endCoordinates.screenY);
+      keyboardHeightRef.current = keyboardHeight;
+      ensureInputVisible(focusedAddItemInputRef.current?.current ?? null);
+    });
+
+    const hideSubscription = Keyboard.addListener('keyboardDidHide', () => {
+      keyboardHeightRef.current = 0;
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, [ensureInputVisible]);
+
+  React.useEffect(() => {
+    if (!showAddItem) {
+      focusedAddItemInputRef.current = null;
+    }
+  }, [showAddItem]);
 
   const handleStatusChange = useCallback(
     (newStatus: EventStatus) => {
@@ -249,6 +316,16 @@ export default function EventDetailScreen() {
     ]);
   };
 
+  const closeAdjustModal = useCallback(() => {
+    setAdjustModal(null);
+    setAdjustQty('');
+  }, []);
+
+  const closePresetList = useCallback(() => {
+    setShowPresetList(false);
+    setPresetSearch('');
+  }, []);
+
   if (isLoading) {
     return (
       <View style={styles.container}>
@@ -285,6 +362,10 @@ export default function EventDetailScreen() {
         contentContainerStyle={styles.scroll}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
+        scrollEventThrottle={16}
+        onScroll={(event) => {
+          currentScrollYRef.current = event.nativeEvent.contentOffset.y;
+        }}
       >
         <View style={styles.statusSection}>
           <View style={styles.statusRow}>
@@ -393,19 +474,18 @@ export default function EventDetailScreen() {
                   {selectedPreset && (
                     <View style={styles.inputRow}>
                       <TextInput
+                        ref={presetPriceInputRef}
                         style={[styles.input, styles.inputHalf]}
                         value={itemPrice}
                         onChangeText={setItemPrice}
                         placeholder="Price ($)"
                         placeholderTextColor={Colors.textMuted}
                         keyboardType="decimal-pad"
-                        onFocus={() => {
-                          setTimeout(() => {
-                            scrollViewRef.current?.scrollToEnd({ animated: true });
-                          }, 300);
-                        }}
+                        onFocus={() => handleAddItemInputFocus(presetPriceInputRef)}
+                        onBlur={() => handleAddItemInputBlur(presetPriceInputRef)}
                       />
                       <TextInput
+                        ref={presetQtyInputRef}
                         style={[styles.input, styles.inputHalf]}
                         value={itemQty}
                         onChangeText={setItemQty}
@@ -413,11 +493,8 @@ export default function EventDetailScreen() {
                         placeholderTextColor={Colors.textMuted}
                         keyboardType="number-pad"
                         autoFocus
-                        onFocus={() => {
-                          setTimeout(() => {
-                            scrollViewRef.current?.scrollToEnd({ animated: true });
-                          }, 300);
-                        }}
+                        onFocus={() => handleAddItemInputFocus(presetQtyInputRef)}
+                        onBlur={() => handleAddItemInputBlur(presetQtyInputRef)}
                       />
                     </View>
                   )}
@@ -427,44 +504,38 @@ export default function EventDetailScreen() {
               {addMode === 'custom' && (
                 <>
                   <TextInput
+                    ref={customNameInputRef}
                     style={styles.input}
                     value={itemName}
                     onChangeText={setItemName}
                     placeholder="Item name (e.g. Special Cocktail)"
                     placeholderTextColor={Colors.textMuted}
                     autoFocus
-                    onFocus={() => {
-                      setTimeout(() => {
-                        scrollViewRef.current?.scrollToEnd({ animated: true });
-                      }, 300);
-                    }}
+                    onFocus={() => handleAddItemInputFocus(customNameInputRef)}
+                    onBlur={() => handleAddItemInputBlur(customNameInputRef)}
                   />
                   <View style={styles.inputRow}>
                     <TextInput
+                      ref={customPriceInputRef}
                       style={[styles.input, styles.inputHalf]}
                       value={itemPrice}
                       onChangeText={setItemPrice}
                       placeholder="Price ($)"
                       placeholderTextColor={Colors.textMuted}
                       keyboardType="decimal-pad"
-                      onFocus={() => {
-                        setTimeout(() => {
-                          scrollViewRef.current?.scrollToEnd({ animated: true });
-                        }, 300);
-                      }}
+                      onFocus={() => handleAddItemInputFocus(customPriceInputRef)}
+                      onBlur={() => handleAddItemInputBlur(customPriceInputRef)}
                     />
                     <TextInput
+                      ref={customQtyInputRef}
                       style={[styles.input, styles.inputHalf]}
                       value={itemQty}
                       onChangeText={setItemQty}
                       placeholder="Quantity"
                       placeholderTextColor={Colors.textMuted}
                       keyboardType="number-pad"
-                      onFocus={() => {
-                        setTimeout(() => {
-                          scrollViewRef.current?.scrollToEnd({ animated: true });
-                        }, 300);
-                      }}
+                      onFocus={() => handleAddItemInputFocus(customQtyInputRef)}
+                      onBlur={() => handleAddItemInputBlur(customQtyInputRef)}
                     />
                   </View>
                 </>
@@ -565,100 +636,106 @@ export default function EventDetailScreen() {
       </ScrollView>
     </KeyboardAvoidingView>
 
-    <Modal visible={adjustModal !== null} transparent animationType="fade">
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>
-              {adjustMode === 'add' ? 'Restock Item' : 'Reduce Quantity'}
-            </Text>
-            {adjustModal && event?.items[adjustModal] && (
-              <Text style={styles.modalSubtitle}>
-                Current: {event.items[adjustModal].qtyRemaining} remaining
-              </Text>
-            )}
-            <View style={styles.adjustModeToggle}>
-              <TouchableOpacity
-                style={[styles.adjustModeBtn, adjustMode === 'add' && styles.adjustModeBtnActiveAdd]}
-                onPress={() => setAdjustMode('add')}
-              >
-                <Plus size={14} color={adjustMode === 'add' ? Colors.white : Colors.textSecondary} />
-                <Text style={[styles.adjustModeText, adjustMode === 'add' && styles.adjustModeTextActive]}>Add</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.adjustModeBtn, adjustMode === 'reduce' && styles.adjustModeBtnActiveReduce]}
-                onPress={() => setAdjustMode('reduce')}
-              >
-                <Minus size={14} color={adjustMode === 'reduce' ? Colors.white : Colors.textSecondary} />
-                <Text style={[styles.adjustModeText, adjustMode === 'reduce' && styles.adjustModeTextActive]}>Reduce</Text>
-              </TouchableOpacity>
-            </View>
-            <TextInput
-              style={styles.input}
-              value={adjustQty}
-              onChangeText={setAdjustQty}
-              placeholder={adjustMode === 'add' ? 'Quantity to add' : 'Quantity to remove'}
-              placeholderTextColor={Colors.textMuted}
-              keyboardType="number-pad"
-              autoFocus
-            />
-            <View style={styles.modalActions}>
-              <TouchableOpacity style={styles.modalCancel} onPress={() => setAdjustModal(null)}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalConfirm, adjustMode === 'reduce' && { backgroundColor: Colors.statusPaused }]}
-                onPress={handleAdjustQty}
-              >
-                <Text style={styles.modalConfirmText}>{adjustMode === 'add' ? 'Restock' : 'Reduce'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+    <KeyboardSafeModal
+      visible={adjustModal !== null}
+      onRequestClose={closeAdjustModal}
+      animationType="fade"
+      variant="centered"
+      initialFocusRef={adjustQtyInputRef}
+      contentStyle={styles.modalContent}
+    >
+      <Text style={styles.modalTitle}>
+        {adjustMode === 'add' ? 'Restock Item' : 'Reduce Quantity'}
+      </Text>
+      {adjustModal && event?.items[adjustModal] && (
+        <Text style={styles.modalSubtitle}>
+          Current: {event.items[adjustModal].qtyRemaining} remaining
+        </Text>
+      )}
+      <View style={styles.adjustModeToggle}>
+        <TouchableOpacity
+          style={[styles.adjustModeBtn, adjustMode === 'add' && styles.adjustModeBtnActiveAdd]}
+          onPress={() => setAdjustMode('add')}
+        >
+          <Plus size={14} color={adjustMode === 'add' ? Colors.white : Colors.textSecondary} />
+          <Text style={[styles.adjustModeText, adjustMode === 'add' && styles.adjustModeTextActive]}>Add</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.adjustModeBtn, adjustMode === 'reduce' && styles.adjustModeBtnActiveReduce]}
+          onPress={() => setAdjustMode('reduce')}
+        >
+          <Minus size={14} color={adjustMode === 'reduce' ? Colors.white : Colors.textSecondary} />
+          <Text style={[styles.adjustModeText, adjustMode === 'reduce' && styles.adjustModeTextActive]}>Reduce</Text>
+        </TouchableOpacity>
+      </View>
+      <TextInput
+        ref={adjustQtyInputRef}
+        style={styles.input}
+        value={adjustQty}
+        onChangeText={setAdjustQty}
+        placeholder={adjustMode === 'add' ? 'Quantity to add' : 'Quantity to remove'}
+        placeholderTextColor={Colors.textMuted}
+        keyboardType="number-pad"
+      />
+      <View style={styles.modalActions}>
+        <TouchableOpacity style={styles.modalCancel} onPress={closeAdjustModal}>
+          <Text style={styles.modalCancelText}>Cancel</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.modalConfirm, adjustMode === 'reduce' && { backgroundColor: Colors.statusPaused }]}
+          onPress={handleAdjustQty}
+        >
+          <Text style={styles.modalConfirmText}>{adjustMode === 'add' ? 'Restock' : 'Reduce'}</Text>
+        </TouchableOpacity>
+      </View>
+    </KeyboardSafeModal>
 
-      <Modal visible={showPresetList} transparent animationType="slide">
-        <KeyboardAvoidingView style={styles.presetModalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <View style={styles.presetModalContent}>
-            <View style={styles.presetModalHeader}>
-              <Text style={styles.presetModalTitle}>Select Drink</Text>
-              <TouchableOpacity onPress={() => { setShowPresetList(false); setPresetSearch(''); }}>
-                <Text style={styles.presetModalClose}>Done</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.presetSearchWrap}>
-              <Search size={16} color={Colors.textMuted} />
-              <TextInput
-                style={styles.presetSearchInput}
-                value={presetSearch}
-                onChangeText={setPresetSearch}
-                placeholder="Search drinks..."
-                placeholderTextColor={Colors.textMuted}
-                autoFocus
-              />
-            </View>
-            <FlatList
-              data={filteredPresets}
-              keyExtractor={(item) => item.name}
-              keyboardShouldPersistTaps="handled"
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.presetRow}
-                  onPress={() => handleSelectPreset(item)}
-                  activeOpacity={0.6}
-                >
-                  <Text style={styles.presetRowName}>{item.name}</Text>
-                  <Text style={styles.presetRowPrice}>{formatMoney(item.priceCents)}</Text>
-                </TouchableOpacity>
-              )}
-              ListEmptyComponent={
-                <View style={styles.presetEmpty}>
-                  <Text style={styles.presetEmptyText}>No drinks found</Text>
-                </View>
-              }
-            />
+    <KeyboardSafeModal
+      visible={showPresetList}
+      onRequestClose={closePresetList}
+      animationType="slide"
+      variant="bottom-sheet"
+      initialFocusRef={presetSearchInputRef}
+      contentStyle={styles.presetModalContent}
+    >
+      <View style={styles.presetModalHeader}>
+        <Text style={styles.presetModalTitle}>Select Drink</Text>
+        <TouchableOpacity onPress={closePresetList}>
+          <Text style={styles.presetModalClose}>Done</Text>
+        </TouchableOpacity>
+      </View>
+      <View style={styles.presetSearchWrap}>
+        <Search size={16} color={Colors.textMuted} />
+        <TextInput
+          ref={presetSearchInputRef}
+          style={styles.presetSearchInput}
+          value={presetSearch}
+          onChangeText={setPresetSearch}
+          placeholder="Search drinks..."
+          placeholderTextColor={Colors.textMuted}
+        />
+      </View>
+      <FlatList
+        data={filteredPresets}
+        keyExtractor={(item) => item.name}
+        keyboardShouldPersistTaps="handled"
+        renderItem={({ item }) => (
+          <TouchableOpacity
+            style={styles.presetRow}
+            onPress={() => handleSelectPreset(item)}
+            activeOpacity={0.6}
+          >
+            <Text style={styles.presetRowName}>{item.name}</Text>
+            <Text style={styles.presetRowPrice}>{formatMoney(item.priceCents)}</Text>
+          </TouchableOpacity>
+        )}
+        ListEmptyComponent={
+          <View style={styles.presetEmpty}>
+            <Text style={styles.presetEmptyText}>No drinks found</Text>
           </View>
-        </KeyboardAvoidingView>
-      </Modal>
+        }
+      />
+    </KeyboardSafeModal>
     </>
   );
 }
@@ -839,13 +916,6 @@ const styles = StyleSheet.create({
   },
   paymentLabel: { fontSize: 14, fontWeight: '600' as const, color: Colors.textSecondary },
   paymentHint: { fontSize: 13, color: Colors.textMuted, marginBottom: 12 },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
   modalContent: {
     backgroundColor: Colors.card,
     borderRadius: 20,
@@ -918,11 +988,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Colors.text,
     fontWeight: '500' as const,
-  },
-  presetModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
   },
   presetModalContent: {
     backgroundColor: Colors.surface,
