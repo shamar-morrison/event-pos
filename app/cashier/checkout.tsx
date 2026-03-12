@@ -1,0 +1,542 @@
+import React, { useState, useMemo, useCallback } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ScrollView,
+  Modal,
+  TextInput,
+  Alert,
+  Dimensions,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
+import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import {
+  Plus,
+  Minus,
+  ShoppingCart,
+  X,
+  PenLine,
+  ChevronRight,
+} from 'lucide-react-native';
+import * as Haptics from 'expo-haptics';
+import Colors from '@/constants/colors';
+import { usePosStore } from '@/store/pos-store';
+import { formatMoney, parseDollarInput } from '@/utils/money';
+import type { CartLine } from '@/types/pos';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const GRID_COLS = SCREEN_WIDTH > 500 ? 3 : 2;
+const CARD_GAP = 10;
+const CARD_WIDTH = (SCREEN_WIDTH - 40 - CARD_GAP * (GRID_COLS - 1)) / GRID_COLS;
+
+export default function POSScreen() {
+  const { eventId } = useLocalSearchParams<{ eventId: string }>();
+  const router = useRouter();
+  const {
+    db,
+    cart,
+    addToCart,
+    incrementCartLine,
+    decrementCartLine,
+    removeCartLine,
+    clearCart,
+    setCurrentEvent,
+  } = usePosStore();
+
+  const event = db.events[eventId ?? ''];
+  const [showCart, setShowCart] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [manualName, setManualName] = useState('');
+  const [manualPrice, setManualPrice] = useState('');
+  const [manualQty, setManualQty] = useState('1');
+  const [manualReason, setManualReason] = useState('');
+
+  React.useEffect(() => {
+    if (eventId) {
+      setCurrentEvent(eventId);
+    }
+  }, [eventId, setCurrentEvent]);
+
+  const items = useMemo(
+    () => (event ? Object.values(event.items).sort((a, b) => a.name.localeCompare(b.name)) : []),
+    [event]
+  );
+
+  const cartTotal = useMemo(
+    () => cart.reduce((sum, l) => sum + l.unitPrice * l.qty, 0),
+    [cart]
+  );
+
+  const cartItemCount = useMemo(
+    () => cart.reduce((sum, l) => sum + l.qty, 0),
+    [cart]
+  );
+
+  const getCartQtyForItem = useCallback(
+    (itemId: string) => {
+      const line = cart.find((l) => l.type === 'inventory' && l.itemId === itemId);
+      return line?.qty ?? 0;
+    },
+    [cart]
+  );
+
+  const handleAddInventoryItem = useCallback(
+    (item: { itemId: string; name: string; price: number; qtyRemaining: number }) => {
+      const inCart = getCartQtyForItem(item.itemId);
+      if (inCart >= item.qtyRemaining) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        return;
+      }
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      addToCart({
+        type: 'inventory',
+        itemId: item.itemId,
+        name: item.name,
+        unitPrice: item.price,
+        qty: 1,
+        maxQty: item.qtyRemaining,
+      });
+    },
+    [addToCart, getCartQtyForItem]
+  );
+
+  const handleAddManual = () => {
+    const name = manualName.trim();
+    if (!name) { Alert.alert('Error', 'Enter a name'); return; }
+    const priceCents = parseDollarInput(manualPrice);
+    if (priceCents === null || priceCents <= 0) { Alert.alert('Error', 'Enter a valid price'); return; }
+    const qty = parseInt(manualQty, 10);
+    if (isNaN(qty) || qty < 1) { Alert.alert('Error', 'Enter a valid quantity'); return; }
+    const reason = manualReason.trim();
+    if (!reason) { Alert.alert('Error', 'A reason is required for manual items'); return; }
+
+    addToCart({
+      type: 'manual',
+      name,
+      unitPrice: priceCents,
+      qty,
+      reason,
+    });
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setManualName('');
+    setManualPrice('');
+    setManualQty('1');
+    setManualReason('');
+    setShowManual(false);
+  };
+
+  const handleCheckout = () => {
+    if (cart.length === 0) {
+      Alert.alert('Empty Cart', 'Add items before checking out');
+      return;
+    }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setShowCart(false);
+    router.push('/cashier/checkout');
+  };
+
+  if (!event) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.errorText}>Event not found</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      <Stack.Screen
+        options={{
+          title: event.name,
+          headerRight: () => (
+            <TouchableOpacity style={styles.manualHeaderBtn} onPress={() => setShowManual(true)}>
+              <PenLine size={18} color={Colors.accent} />
+            </TouchableOpacity>
+          ),
+        }}
+      />
+
+      <ScrollView style={styles.itemsScroll} contentContainerStyle={styles.itemsGrid}>
+        {items.map((item) => {
+          const inCart = getCartQtyForItem(item.itemId);
+          const soldOut = item.qtyRemaining === 0;
+          const atMax = inCart >= item.qtyRemaining;
+
+          return (
+            <TouchableOpacity
+              key={item.itemId}
+              style={[
+                styles.itemCard,
+                { width: CARD_WIDTH },
+                soldOut && styles.itemCardSoldOut,
+                inCart > 0 && styles.itemCardSelected,
+              ]}
+              onPress={() => handleAddInventoryItem(item)}
+              disabled={soldOut}
+              activeOpacity={0.7}
+            >
+              {inCart > 0 && (
+                <View style={styles.cartBadge}>
+                  <Text style={styles.cartBadgeText}>{inCart}</Text>
+                </View>
+              )}
+              <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
+              <Text style={styles.itemCardPrice}>{formatMoney(item.price)}</Text>
+              <Text style={[styles.itemRemaining, soldOut && styles.itemSoldOut]}>
+                {soldOut ? 'SOLD OUT' : `${item.qtyRemaining - inCart} left`}
+              </Text>
+              {!soldOut && (
+                <View style={[styles.addIndicator, atMax && styles.addIndicatorDisabled]}>
+                  <Plus size={16} color={atMax ? Colors.textMuted : Colors.primary} />
+                </View>
+              )}
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      {cartItemCount > 0 && (
+        <TouchableOpacity
+          style={styles.cartBar}
+          onPress={() => setShowCart(true)}
+          activeOpacity={0.8}
+        >
+          <View style={styles.cartBarLeft}>
+            <View style={styles.cartBarBadge}>
+              <ShoppingCart size={18} color={Colors.white} />
+              <View style={styles.cartBarCount}>
+                <Text style={styles.cartBarCountText}>{cartItemCount}</Text>
+              </View>
+            </View>
+            <Text style={styles.cartBarLabel}>View Cart</Text>
+          </View>
+          <View style={styles.cartBarRight}>
+            <Text style={styles.cartBarTotal}>{formatMoney(cartTotal)}</Text>
+            <ChevronRight size={18} color={Colors.white} />
+          </View>
+        </TouchableOpacity>
+      )}
+
+      <Modal visible={showCart} animationType="slide" transparent>
+        <View style={styles.cartModal}>
+          <View style={styles.cartModalContent}>
+            <View style={styles.cartModalHeader}>
+              <Text style={styles.cartModalTitle}>Cart ({cartItemCount})</Text>
+              <TouchableOpacity onPress={() => setShowCart(false)}>
+                <X size={24} color={Colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.cartList}>
+              {cart.map((line, idx) => (
+                <View key={`${line.itemId ?? line.name}-${idx}`} style={styles.cartLine}>
+                  <View style={styles.cartLineInfo}>
+                    <Text style={styles.cartLineName} numberOfLines={1}>{line.name}</Text>
+                    {line.type === 'manual' && (
+                      <Text style={styles.cartLineReason}>{line.reason}</Text>
+                    )}
+                    <Text style={styles.cartLinePrice}>
+                      {formatMoney(line.unitPrice)} × {line.qty} = {formatMoney(line.unitPrice * line.qty)}
+                    </Text>
+                  </View>
+                  <View style={styles.cartLineActions}>
+                    <TouchableOpacity style={styles.qtyBtn} onPress={() => decrementCartLine(idx)}>
+                      <Minus size={14} color={Colors.text} />
+                    </TouchableOpacity>
+                    <Text style={styles.qtyText}>{line.qty}</Text>
+                    <TouchableOpacity
+                      style={[styles.qtyBtn, line.type === 'inventory' && line.maxQty !== undefined && line.qty >= line.maxQty && styles.qtyBtnDisabled]}
+                      onPress={() => incrementCartLine(idx)}
+                      disabled={line.type === 'inventory' && line.maxQty !== undefined && line.qty >= line.maxQty}
+                    >
+                      <Plus size={14} color={Colors.text} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.removeBtn} onPress={() => removeCartLine(idx)}>
+                      <X size={14} color={Colors.danger} />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </ScrollView>
+
+            <View style={styles.cartFooter}>
+              <TouchableOpacity style={styles.clearBtn} onPress={() => { clearCart(); setShowCart(false); }}>
+                <Text style={styles.clearBtnText}>Clear Cart</Text>
+              </TouchableOpacity>
+              <View style={styles.cartTotalRow}>
+                <Text style={styles.cartTotalLabel}>Total</Text>
+                <Text style={styles.cartTotalValue}>{formatMoney(cartTotal)}</Text>
+              </View>
+              <TouchableOpacity style={styles.checkoutBtn} onPress={handleCheckout}>
+                <Text style={styles.checkoutBtnText}>Checkout</Text>
+                <ChevronRight size={18} color={Colors.white} />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showManual} animationType="slide" transparent>
+        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.manualModal}>
+            <View style={styles.cartModalHeader}>
+              <Text style={styles.cartModalTitle}>Custom Item</Text>
+              <TouchableOpacity onPress={() => setShowManual(false)}>
+                <X size={24} color={Colors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.manualForm}>
+              <TextInput
+                style={styles.input}
+                value={manualName}
+                onChangeText={setManualName}
+                placeholder="Item name"
+                placeholderTextColor={Colors.textMuted}
+                autoFocus
+              />
+              <View style={styles.manualRow}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={manualPrice}
+                  onChangeText={setManualPrice}
+                  placeholder="Price ($)"
+                  placeholderTextColor={Colors.textMuted}
+                  keyboardType="decimal-pad"
+                />
+                <TextInput
+                  style={[styles.input, { width: 80 }]}
+                  value={manualQty}
+                  onChangeText={setManualQty}
+                  placeholder="Qty"
+                  placeholderTextColor={Colors.textMuted}
+                  keyboardType="number-pad"
+                />
+              </View>
+              <TextInput
+                style={styles.input}
+                value={manualReason}
+                onChangeText={setManualReason}
+                placeholder="Reason (required)"
+                placeholderTextColor={Colors.textMuted}
+              />
+              <TouchableOpacity style={styles.submitBtn} onPress={handleAddManual}>
+                <Text style={styles.submitBtnText}>Add to Cart</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.bg },
+  errorText: { color: Colors.danger, textAlign: 'center', marginTop: 40, fontSize: 16 },
+  manualHeaderBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: Colors.accentBg,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  itemsScroll: { flex: 1 },
+  itemsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    padding: 16,
+    gap: CARD_GAP,
+    paddingBottom: 100,
+  },
+  itemCard: {
+    backgroundColor: Colors.card,
+    borderRadius: 14,
+    padding: 14,
+    minHeight: 120,
+    justifyContent: 'space-between',
+  },
+  itemCardSoldOut: { opacity: 0.35 },
+  itemCardSelected: {
+    borderWidth: 2,
+    borderColor: Colors.primary,
+  },
+  cartBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    backgroundColor: Colors.primary,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1,
+  },
+  cartBadgeText: { fontSize: 12, fontWeight: '700' as const, color: Colors.white },
+  itemName: { fontSize: 15, fontWeight: '600' as const, color: Colors.text, marginBottom: 6 },
+  itemCardPrice: { fontSize: 18, fontWeight: '700' as const, color: Colors.primary, marginBottom: 4 },
+  itemRemaining: { fontSize: 12, color: Colors.textSecondary },
+  itemSoldOut: { color: Colors.danger, fontWeight: '600' as const },
+  addIndicator: {
+    position: 'absolute',
+    bottom: 10,
+    right: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: Colors.primaryBg,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  addIndicatorDisabled: { backgroundColor: Colors.surface },
+  cartBar: {
+    position: 'absolute',
+    bottom: 24,
+    left: 16,
+    right: 16,
+    backgroundColor: Colors.primary,
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    shadowColor: Colors.primary,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  cartBarLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  cartBarBadge: { flexDirection: 'row', alignItems: 'center' },
+  cartBarCount: {
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 6,
+  },
+  cartBarCountText: { fontSize: 11, fontWeight: '700' as const, color: Colors.white },
+  cartBarLabel: { fontSize: 16, fontWeight: '600' as const, color: Colors.white },
+  cartBarRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  cartBarTotal: { fontSize: 18, fontWeight: '700' as const, color: Colors.white },
+  cartModal: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  cartModalContent: {
+    backgroundColor: Colors.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '80%',
+    paddingBottom: 34,
+  },
+  cartModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  cartModalTitle: { fontSize: 20, fontWeight: '700' as const, color: Colors.text },
+  cartList: { paddingHorizontal: 20 },
+  cartLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border + '40',
+  },
+  cartLineInfo: { flex: 1, marginRight: 12 },
+  cartLineName: { fontSize: 15, fontWeight: '500' as const, color: Colors.text },
+  cartLineReason: { fontSize: 12, color: Colors.accent, marginTop: 2 },
+  cartLinePrice: { fontSize: 13, color: Colors.textSecondary, marginTop: 2 },
+  cartLineActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  qtyBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: Colors.card,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  qtyBtnDisabled: { opacity: 0.3 },
+  qtyText: { fontSize: 16, fontWeight: '600' as const, color: Colors.text, minWidth: 24, textAlign: 'center' as const },
+  removeBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: Colors.dangerBg,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 4,
+  },
+  cartFooter: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  clearBtn: {
+    alignSelf: 'center',
+    paddingVertical: 8,
+    marginBottom: 12,
+  },
+  clearBtnText: { fontSize: 14, color: Colors.danger, fontWeight: '500' as const },
+  cartTotalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  cartTotalLabel: { fontSize: 18, fontWeight: '600' as const, color: Colors.textSecondary },
+  cartTotalValue: { fontSize: 28, fontWeight: '800' as const, color: Colors.text },
+  checkoutBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: 14,
+    paddingVertical: 16,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  checkoutBtnText: { fontSize: 17, fontWeight: '700' as const, color: Colors.white },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  manualModal: {
+    backgroundColor: Colors.surface,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  manualForm: { padding: 20, gap: 12 },
+  manualRow: { flexDirection: 'row', gap: 10 },
+  input: {
+    backgroundColor: Colors.card,
+    borderRadius: 10,
+    padding: 14,
+    fontSize: 16,
+    color: Colors.text,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  submitBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  submitBtnText: { fontSize: 15, fontWeight: '600' as const, color: Colors.white },
+});
