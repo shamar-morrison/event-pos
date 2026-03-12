@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
   ScrollView,
   StyleSheet,
   Text,
@@ -26,9 +27,9 @@ const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; Icon: typeof Banknot
   { key: 'comp', label: 'Comp', Icon: Gift },
 ];
 
-const CASH_INPUT_MARGIN = 20;
 const CONTENT_PADDING = 20;
 const BUTTON_BOTTOM_PADDING = 20;
+const CHECKOUT_KEYBOARD_OFFSET = 84;
 
 export default function CheckoutScreen() {
   const router = useRouter();
@@ -41,9 +42,6 @@ export default function CheckoutScreen() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [cashReceived, setCashReceived] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const scrollViewRef = useRef<ScrollView>(null);
-  const cashInputRef = useRef<TextInput | null>(null);
-  const focusedInputRef = useRef<TextInput | null>(null);
   const dismissInProgressRef = useRef(false);
 
   const { data: event, isLoading } = useCashierEventDetail(pairedAdmin?.adminId, currentEventId);
@@ -59,19 +57,6 @@ export default function CheckoutScreen() {
     : '/cashier';
   const invalidDismissHref = currentEventId && event ? activeEventHref : '/cashier';
   const bottomInset = Math.max(insets.bottom, 16);
-
-  const ensureInputVisible = useCallback((input: TextInput | null) => {
-    if (!input || !scrollViewRef.current) return;
-
-    requestAnimationFrame(() => {
-      const scrollResponder = scrollViewRef.current?.getScrollResponder();
-      if (!scrollResponder || typeof scrollResponder.scrollResponderScrollNativeHandleToKeyboard !== 'function') {
-        return;
-      }
-
-      scrollResponder.scrollResponderScrollNativeHandleToKeyboard(input, CASH_INPUT_MARGIN, true);
-    });
-  }, []);
 
   useEffect(() => {
     if (event?.defaultPaymentMethod) {
@@ -95,12 +80,6 @@ export default function CheckoutScreen() {
       dismissInProgressRef.current = false;
     }
   }, [cart.length, event, isLoading]);
-
-  useEffect(() => {
-    if (paymentMethod !== 'cash') {
-      focusedInputRef.current = null;
-    }
-  }, [paymentMethod]);
 
   const handleSubmit = async () => {
     if (!event) return;
@@ -182,10 +161,13 @@ export default function CheckoutScreen() {
     submitting || (paymentMethod === 'cash' && (cashReceivedCents === null || cashReceivedCents < total));
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior="height"
+      keyboardVerticalOffset={CHECKOUT_KEYBOARD_OFFSET}
+    >
       <Stack.Screen options={{ title: 'Checkout' }} />
       <ScrollView
-        ref={scrollViewRef}
         style={styles.scrollView}
         contentContainerStyle={[styles.scroll, { paddingBottom: bottomInset + BUTTON_BOTTOM_PADDING }]}
         keyboardShouldPersistTaps="handled"
@@ -241,22 +223,12 @@ export default function CheckoutScreen() {
           <View style={styles.sectionCard}>
             <Text style={styles.cashLabel}>Cash Received</Text>
             <TextInput
-              ref={cashInputRef}
               style={styles.cashInput}
               value={cashReceived}
               onChangeText={setCashReceived}
               placeholder="0.00"
               placeholderTextColor={Colors.textMuted}
               keyboardType="decimal-pad"
-              onFocus={() => {
-                focusedInputRef.current = cashInputRef.current;
-                ensureInputVisible(cashInputRef.current);
-              }}
-              onBlur={() => {
-                if (focusedInputRef.current === cashInputRef.current) {
-                  focusedInputRef.current = null;
-                }
-              }}
             />
 
             <View style={styles.cashRow}>
@@ -301,7 +273,7 @@ export default function CheckoutScreen() {
           </TouchableOpacity>
         </View>
       </ScrollView>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
