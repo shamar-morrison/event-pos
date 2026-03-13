@@ -1,17 +1,19 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import {
+  Alert,
+  Animated,
+  Dimensions,
+  ActivityIndicator,
+  PanResponder,
+  Pressable,
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   ScrollView,
-  Modal,
   TextInput,
-  Alert,
-  Dimensions,
-  ActivityIndicator,
 } from 'react-native';
-import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useLocalSearchParams, useNavigation, useRouter, Stack } from 'expo-router';
 import {
   Plus,
   Minus,
@@ -28,14 +30,19 @@ import { useCashierEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const GRID_COLS = SCREEN_WIDTH > 500 ? 3 : 2;
 const CARD_GAP = 10;
 const CARD_WIDTH = (SCREEN_WIDTH - 40 - CARD_GAP * (GRID_COLS - 1)) / GRID_COLS;
+const CART_SHEET_HIDDEN_OFFSET = SCREEN_HEIGHT;
+const CART_SHEET_ANIMATION_DURATION = 220;
+const CART_SHEET_DISMISS_THRESHOLD = 120;
+const CART_SHEET_DISMISS_VELOCITY = 1.1;
 
 export default function POSScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const router = useRouter();
+  const navigation = useNavigation();
   const pairedAdmin = usePosStore((state) => state.pairedAdmin);
   const cart = usePosStore((state) => state.cart);
   const addToCart = usePosStore((state) => state.addToCart);
@@ -46,6 +53,7 @@ export default function POSScreen() {
   const setCurrentEvent = usePosStore((state) => state.setCurrentEvent);
   const { data: event, isLoading } = useCashierEventDetail(pairedAdmin?.adminId, eventId);
   const [showCart, setShowCart] = useState(false);
+  const [isCartMounted, setIsCartMounted] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [itemSearch, setItemSearch] = useState('');
   const [manualName, setManualName] = useState('');
@@ -53,12 +61,161 @@ export default function POSScreen() {
   const [manualQty, setManualQty] = useState('1');
   const [manualReason, setManualReason] = useState('');
   const manualNameInputRef = React.useRef<TextInput | null>(null);
+  const cartTranslateY = React.useRef(new Animated.Value(CART_SHEET_HIDDEN_OFFSET)).current;
+  const cartBackdropOpacity = React.useRef(new Animated.Value(0)).current;
+  const cartSheetHeightRef = React.useRef(CART_SHEET_HIDDEN_OFFSET);
+  const cartAnimationRef = React.useRef<Animated.CompositeAnimation | null>(null);
 
   React.useEffect(() => {
     if (eventId) {
       setCurrentEvent(eventId);
     }
   }, [eventId, setCurrentEvent]);
+
+  const getCartHiddenOffset = useCallback(
+    () => Math.max(cartSheetHeightRef.current, CART_SHEET_HIDDEN_OFFSET),
+    []
+  );
+
+  const stopCartAnimation = useCallback(() => {
+    cartAnimationRef.current?.stop();
+    cartAnimationRef.current = null;
+  }, []);
+
+  const animateCartSheet = useCallback(
+    (translateTo: number, backdropTo: number, onComplete?: () => void) => {
+      stopCartAnimation();
+
+      const animation = Animated.parallel([
+        Animated.timing(cartTranslateY, {
+          toValue: translateTo,
+          duration: CART_SHEET_ANIMATION_DURATION,
+          useNativeDriver: true,
+        }),
+        Animated.timing(cartBackdropOpacity, {
+          toValue: backdropTo,
+          duration: CART_SHEET_ANIMATION_DURATION,
+          useNativeDriver: true,
+        }),
+      ]);
+
+      cartAnimationRef.current = animation;
+      animation.start(({ finished }) => {
+        if (cartAnimationRef.current === animation) {
+          cartAnimationRef.current = null;
+        }
+
+        if (finished) {
+          onComplete?.();
+        }
+      });
+    },
+    [cartBackdropOpacity, cartTranslateY, stopCartAnimation]
+  );
+
+  const openCart = useCallback(() => {
+    const hiddenOffset = getCartHiddenOffset();
+    setIsCartMounted(true);
+    setShowCart(true);
+    cartTranslateY.setValue(hiddenOffset);
+    cartBackdropOpacity.setValue(0);
+    requestAnimationFrame(() => {
+      animateCartSheet(0, 1);
+    });
+  }, [animateCartSheet, cartBackdropOpacity, cartTranslateY, getCartHiddenOffset]);
+
+  const closeCart = useCallback(
+    (onComplete?: () => void) => {
+      setShowCart(false);
+
+      if (!isCartMounted) {
+        onComplete?.();
+        return;
+      }
+
+      animateCartSheet(getCartHiddenOffset(), 0, () => {
+        setIsCartMounted(false);
+        onComplete?.();
+      });
+    },
+    [animateCartSheet, getCartHiddenOffset, isCartMounted]
+  );
+
+  React.useEffect(
+    () => () => {
+      stopCartAnimation();
+    },
+    [stopCartAnimation]
+  );
+
+  React.useEffect(() => {
+    if (!isCartMounted || cart.length > 0) {
+      return;
+    }
+
+    closeCart();
+  }, [cart.length, closeCart, isCartMounted]);
+
+  React.useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', (removeEvent) => {
+      if (!isCartMounted) {
+        return;
+      }
+
+      removeEvent.preventDefault();
+      if (showCart) {
+        closeCart();
+      }
+    });
+
+    return unsubscribe;
+  }, [closeCart, isCartMounted, navigation, showCart]);
+
+  const cartPanResponder = React.useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) =>
+          showCart && gestureState.dy > 8 && Math.abs(gestureState.dy) > Math.abs(gestureState.dx),
+        onPanResponderGrant: () => {
+          stopCartAnimation();
+          cartTranslateY.stopAnimation((value) => {
+            cartTranslateY.setValue(Math.max(0, value));
+          });
+          cartBackdropOpacity.stopAnimation((value) => {
+            cartBackdropOpacity.setValue(value);
+          });
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          const nextTranslateY = Math.max(0, gestureState.dy);
+          cartTranslateY.setValue(nextTranslateY);
+          cartBackdropOpacity.setValue(Math.max(0, 1 - nextTranslateY / getCartHiddenOffset()));
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          const shouldDismiss =
+            gestureState.dy > CART_SHEET_DISMISS_THRESHOLD ||
+            gestureState.vy > CART_SHEET_DISMISS_VELOCITY;
+
+          if (shouldDismiss) {
+            closeCart();
+            return;
+          }
+
+          animateCartSheet(0, 1);
+        },
+        onPanResponderTerminate: () => {
+          animateCartSheet(0, 1);
+        },
+      }),
+    [
+      animateCartSheet,
+      cartBackdropOpacity,
+      cartTranslateY,
+      closeCart,
+      getCartHiddenOffset,
+      showCart,
+      stopCartAnimation,
+    ]
+  );
 
   const items = useMemo(
     () => (event ? Object.values(event.items).sort((a, b) => a.name.localeCompare(b.name)) : []),
@@ -144,8 +301,9 @@ export default function POSScreen() {
       return;
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setShowCart(false);
-    router.push('/cashier/checkout');
+    closeCart(() => {
+      router.push('/cashier/checkout');
+    });
   };
 
   if (isLoading) {
@@ -252,7 +410,7 @@ export default function POSScreen() {
       {cartItemCount > 0 && (
         <TouchableOpacity
           style={styles.cartBar}
-          onPress={() => setShowCart(true)}
+          onPress={openCart}
           activeOpacity={0.8}
         >
           <View style={styles.cartBarLeft}>
@@ -271,17 +429,32 @@ export default function POSScreen() {
         </TouchableOpacity>
       )}
 
-      <Modal visible={showCart} animationType="slide" transparent>
-        <View style={styles.cartModal}>
-          <View style={styles.cartModalContent}>
+      {isCartMounted && (
+        <View style={styles.cartOverlay}>
+          <Animated.View style={[styles.cartBackdrop, { opacity: cartBackdropOpacity }]}>
+            <Pressable style={styles.cartBackdropPressable} onPress={() => closeCart()} />
+          </Animated.View>
+          <Animated.View
+            style={[
+              styles.cartModalContent,
+              styles.cartSheet,
+              { transform: [{ translateY: cartTranslateY }] },
+            ]}
+            onLayout={(layoutEvent) => {
+              cartSheetHeightRef.current = layoutEvent.nativeEvent.layout.height;
+            }}
+          >
+            <View style={styles.cartHandleZone} {...cartPanResponder.panHandlers}>
+              <View style={styles.cartHandle} />
+            </View>
             <View style={styles.cartModalHeader}>
               <Text style={styles.cartModalTitle}>Cart ({cartItemCount})</Text>
-              <TouchableOpacity onPress={() => setShowCart(false)}>
+              <TouchableOpacity onPress={() => closeCart()}>
                 <X size={24} color={Colors.textSecondary} />
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={styles.cartList}>
+            <ScrollView style={styles.cartList} keyboardShouldPersistTaps="handled">
               {cart.map((line, idx) => (
                 <View key={`${line.itemId ?? line.name}-${idx}`} style={styles.cartLine}>
                   <View style={styles.cartLineInfo}>
@@ -314,7 +487,13 @@ export default function POSScreen() {
             </ScrollView>
 
             <View style={styles.cartFooter}>
-              <TouchableOpacity style={styles.clearBtn} onPress={() => { clearCart(); setShowCart(false); }}>
+              <TouchableOpacity
+                style={styles.clearBtn}
+                onPress={() => {
+                  clearCart();
+                  closeCart();
+                }}
+              >
                 <Text style={styles.clearBtnText}>Clear Cart</Text>
               </TouchableOpacity>
               <View style={styles.cartTotalRow}>
@@ -326,9 +505,9 @@ export default function POSScreen() {
                 <ChevronRight size={18} color={Colors.white} />
               </TouchableOpacity>
             </View>
-          </View>
+          </Animated.View>
         </View>
-      </Modal>
+      )}
 
       <KeyboardSafeModal
         visible={showManual}
@@ -524,10 +703,17 @@ const styles = StyleSheet.create({
   cartBarLabel: { fontSize: 16, fontWeight: '600' as const, color: Colors.white },
   cartBarRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   cartBarTotal: { fontSize: 18, fontWeight: '700' as const, color: Colors.white },
-  cartModal: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+  cartOverlay: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: 'flex-end',
+    zIndex: 20,
+  },
+  cartBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  cartBackdropPressable: {
+    flex: 1,
   },
   cartModalContent: {
     backgroundColor: Colors.surface,
@@ -535,6 +721,21 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
     maxHeight: '80%',
     paddingBottom: 34,
+    overflow: 'hidden',
+  },
+  cartSheet: {
+    width: '100%',
+  },
+  cartHandleZone: {
+    alignItems: 'center',
+    paddingTop: 10,
+    paddingBottom: 2,
+  },
+  cartHandle: {
+    width: 44,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: Colors.border,
   },
   cartModalHeader: {
     flexDirection: 'row',
