@@ -107,7 +107,7 @@ const PaymentIcon = ({ method, size }: { method: PaymentMethod; size: number }) 
 export default function ReportsScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
   const pairedAdmin = usePosStore((state) => state.pairedAdmin);
-  const { data: event, isLoading } = useAdminEventReport(pairedAdmin?.adminId, eventId);
+  const { data: event, isPending } = useAdminEventReport(pairedAdmin?.adminId, eventId);
   const { data: cashiers = [] } = useCashiers(pairedAdmin?.adminId);
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
 
@@ -144,7 +144,9 @@ export default function ReportsScreen() {
     setSelectedOrderId(null);
   }, [orders, selectedOrderId]);
 
-  if (isLoading) {
+  const isScreenLoading = isPending || event === undefined;
+
+  if (isScreenLoading) {
     return (
       <View style={styles.container}>
         <ActivityIndicator size="large" color={Colors.primary} />
