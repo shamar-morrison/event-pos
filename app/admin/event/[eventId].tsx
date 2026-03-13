@@ -718,6 +718,8 @@ export default function EventDetailScreen() {
       <FlatList
         data={filteredPresets}
         keyExtractor={(item) => item.name}
+        style={styles.presetList}
+        contentContainerStyle={styles.presetListContent}
         keyboardShouldPersistTaps="handled"
         renderItem={({ item }) => (
           <TouchableOpacity
@@ -993,7 +995,7 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.surface,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: '70%',
+    height: '70%',
     paddingBottom: 34,
   },
   presetModalHeader: {
@@ -1031,6 +1033,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Colors.text,
   },
+  presetList: {
+    flex: 1,
+  },
+  presetListContent: {
+    flexGrow: 1,
+  },
   presetRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1052,8 +1060,10 @@ const styles = StyleSheet.create({
     marginLeft: 12,
   },
   presetEmpty: {
+    flex: 1,
     padding: 32,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   presetEmptyText: {
     fontSize: 15,
