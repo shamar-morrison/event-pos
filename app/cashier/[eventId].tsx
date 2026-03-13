@@ -12,6 +12,7 @@ import {
   TouchableOpacity,
   ScrollView,
   TextInput,
+  RefreshControl,
 } from 'react-native';
 import { useLocalSearchParams, useNavigation, useRouter, Stack } from 'expo-router';
 import {
@@ -22,6 +23,7 @@ import {
   PenLine,
   ChevronRight,
   Search,
+  RefreshCw,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
@@ -52,7 +54,8 @@ export default function POSScreen() {
   const removeCartLine = usePosStore((state) => state.removeCartLine);
   const clearCart = usePosStore((state) => state.clearCart);
   const setCurrentEvent = usePosStore((state) => state.setCurrentEvent);
-  const { data: event, isLoading } = useCashierEventDetail(pairedAdmin?.adminId, eventId);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const { data: event, isLoading, refetch } = useCashierEventDetail(pairedAdmin?.adminId, eventId);
   const [showCart, setShowCart] = useState(false);
   const [isCartMounted, setIsCartMounted] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -308,6 +311,20 @@ export default function POSScreen() {
     });
   };
 
+  const handleRefresh = useCallback(async () => {
+    if (!pairedAdmin?.adminId || !eventId) {
+      return;
+    }
+
+    setIsRefreshing(true);
+
+    try {
+      await refetch();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [eventId, pairedAdmin?.adminId, refetch]);
+
   if (isLoading) {
     return (
       <View style={styles.container}>
@@ -330,9 +347,24 @@ export default function POSScreen() {
         options={{
           title: event.name,
           headerRight: () => (
-            <TouchableOpacity style={styles.manualHeaderBtn} onPress={() => setShowManual(true)}>
-              <PenLine size={18} color={Colors.accent} />
-            </TouchableOpacity>
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                style={[styles.headerActionBtn, styles.refreshHeaderBtn, isRefreshing && styles.headerActionBtnDisabled]}
+                onPress={() => {
+                  void handleRefresh();
+                }}
+                disabled={isRefreshing}
+              >
+                {isRefreshing ? (
+                  <ActivityIndicator size="small" color={Colors.primary} />
+                ) : (
+                  <RefreshCw size={18} color={Colors.primary} />
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.headerActionBtn, styles.manualHeaderBtn]} onPress={() => setShowManual(true)}>
+                <PenLine size={18} color={Colors.accent} />
+              </TouchableOpacity>
+            </View>
           ),
         }}
       />
@@ -355,8 +387,21 @@ export default function POSScreen() {
 
       <ScrollView
         style={styles.itemsScroll}
-        contentContainerStyle={styles.itemsGrid}
+        contentContainerStyle={[
+          styles.itemsGrid,
+          filteredItems.length === 0 && styles.emptyItemsGrid,
+        ]}
         keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={handleRefresh}
+            tintColor={Colors.textSecondary}
+            colors={[Colors.primary]}
+          />
+        }
+        alwaysBounceVertical
+        showsVerticalScrollIndicator={false}
       >
         {filteredItems.length === 0 ? (
           <View style={styles.emptyState}>
@@ -574,13 +619,26 @@ export default function POSScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.bg },
   errorText: { color: Colors.danger, textAlign: 'center', marginTop: 40, fontSize: 16 },
-  manualHeaderBtn: {
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  headerActionBtn: {
     width: 38,
     height: 38,
     borderRadius: 12,
-    backgroundColor: Colors.accentBg,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  headerActionBtnDisabled: {
+    opacity: 0.7,
+  },
+  refreshHeaderBtn: {
+    backgroundColor: Colors.primaryBg,
+  },
+  manualHeaderBtn: {
+    backgroundColor: Colors.accentBg,
   },
   searchBarWrap: {
     paddingHorizontal: 16,
@@ -606,11 +664,15 @@ const styles = StyleSheet.create({
   },
   itemsScroll: { flex: 1 },
   itemsGrid: {
+    flexGrow: 1,
     flexDirection: 'row',
     flexWrap: 'wrap',
     padding: 16,
     gap: CARD_GAP,
     paddingBottom: 100,
+  },
+  emptyItemsGrid: {
+    justifyContent: 'center',
   },
   emptyState: {
     width: '100%',

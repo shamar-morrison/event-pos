@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
+  RefreshControl,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -23,7 +24,8 @@ export default function CashierEventsScreen() {
   const pairedAdmin = usePosStore((state) => state.pairedAdmin);
   const setCurrentEvent = usePosStore((state) => state.setCurrentEvent);
   const unpairDevice = usePosStore((state) => state.unpairDevice);
-  const { data: liveEvents = [] } = useCashierEvents(pairedAdmin?.adminId);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const { data: liveEvents = [], refetch } = useCashierEvents(pairedAdmin?.adminId);
 
   const handleLogout = () => {
     Alert.alert('Cashier Session', 'Choose how you want to leave cashier mode.', [
@@ -52,6 +54,20 @@ export default function CashierEventsScreen() {
     router.push(`/cashier/${eventId}`);
   };
 
+  const handleRefresh = useCallback(async () => {
+    if (!pairedAdmin?.adminId) {
+      return;
+    }
+
+    setIsRefreshing(true);
+
+    try {
+      await refetch();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [pairedAdmin?.adminId, refetch]);
+
   return (
     <View style={styles.bg}>
       <SafeAreaView style={styles.safe} edges={['top']}>
@@ -69,7 +85,23 @@ export default function CashierEventsScreen() {
           </TouchableOpacity>
         </View>
 
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[
+            styles.scrollContent,
+            liveEvents.length === 0 && styles.emptyScrollContent,
+          ]}
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              tintColor={Colors.textSecondary}
+              colors={[Colors.primary]}
+            />
+          }
+          alwaysBounceVertical
+          showsVerticalScrollIndicator={false}
+        >
           {liveEvents.length === 0 ? (
             <EmptyState
               icon={<Calendar size={48} color={Colors.textMuted} />}
@@ -128,7 +160,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   scroll: { flex: 1 },
-  scrollContent: { paddingHorizontal: 20, paddingBottom: 40 },
+  scrollContent: { flexGrow: 1, paddingHorizontal: 20, paddingBottom: 40 },
+  emptyScrollContent: { justifyContent: 'center' },
   eventList: { gap: 12 },
   eventCard: {
     backgroundColor: Colors.card,
