@@ -26,6 +26,7 @@ const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; Icon: typeof Banknot
   { key: 'mobile', label: 'Mobile', Icon: Smartphone },
   { key: 'comp', label: 'Comp', Icon: Gift },
 ];
+const CASH_RECEIVED_PRESETS = [500, 1000, 2000, 5000] as const;
 
 const CONTENT_PADDING = 20;
 const BUTTON_BOTTOM_PADDING = 20;
@@ -230,6 +231,32 @@ export default function CheckoutScreen() {
               placeholderTextColor={Colors.textMuted}
               keyboardType="decimal-pad"
             />
+            <View style={styles.cashPresetGrid}>
+              {CASH_RECEIVED_PRESETS.map((preset) => {
+                const isSelected = cashReceivedCents === preset * 100;
+
+                return (
+                  <TouchableOpacity
+                    key={preset}
+                    style={[
+                      styles.cashPresetButton,
+                      isSelected && styles.cashPresetButtonSelected,
+                    ]}
+                    onPress={() => setCashReceived(String(preset))}
+                    activeOpacity={0.8}
+                  >
+                    <Text
+                      style={[
+                        styles.cashPresetText,
+                        isSelected && styles.cashPresetTextSelected,
+                      ]}
+                    >
+                      {preset}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
 
             <View style={styles.cashRow}>
               <Text style={styles.cashRowLabel}>Total</Text>
@@ -406,6 +433,34 @@ const styles = StyleSheet.create({
     padding: 16,
     fontSize: 18,
     color: Colors.text,
+  },
+  cashPresetGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  cashPresetButton: {
+    minWidth: 72,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cashPresetButtonSelected: {
+    backgroundColor: Colors.primaryBg,
+    borderColor: Colors.primary,
+  },
+  cashPresetText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: Colors.textSecondary,
+  },
+  cashPresetTextSelected: {
+    color: Colors.primary,
   },
   cashRow: {
     flexDirection: 'row',
