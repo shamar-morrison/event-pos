@@ -4,6 +4,11 @@ export interface PresetDrink {
 }
 
 const PRESET_DRINKS: PresetDrink[] = [
+  // Flasks
+  { name: 'White Rum (Flask)', priceCents: 200000 },
+  { name: 'Appleton Signature (Flask)', priceCents: 200000 },
+  { name: 'Smirnoff Vodka (Flask)', priceCents: 200000 },
+  { name: 'Campari (Flask)', priceCents: 200000 },
   // Beers
   { name: 'Red Stripe', priceCents: 50000 },
   { name: 'Red Stripe Sorrel', priceCents: 40000 },
