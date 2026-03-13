@@ -35,10 +35,9 @@ export default function AdminDashboard() {
   const { data: cashiers = [] } = useCashiers(pairedAdmin?.adminId);
 
   const stats = useMemo(() => {
-    const liveCount = events.filter((e) => e.status === 'live').length;
     const totalRevenue = events.reduce((sum, e) => sum + e.stats.totalRevenue, 0);
     const totalOrders = events.reduce((sum, e) => sum + e.stats.totalOrders, 0);
-    return { liveCount, totalRevenue, totalOrders };
+    return { totalRevenue, totalOrders };
   }, [events]);
 
   const cashierCount = cashiers.length;
@@ -79,11 +78,6 @@ export default function AdminDashboard() {
 
         <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <View style={styles.statsRow}>
-            <View style={[styles.statCard, { backgroundColor: Colors.primaryBg }]}>
-              <Calendar size={20} color={Colors.primary} />
-              <Text style={[styles.statValue, { color: Colors.primary }]}>{stats.liveCount}</Text>
-              <Text style={styles.statLabel}>Live Events</Text>
-            </View>
             <View style={[styles.statCard, { backgroundColor: Colors.accentBg }]}>
               <TrendingUp size={20} color={Colors.accent} />
               <Text style={[styles.statValue, { color: Colors.accent }]}>{formatMoney(stats.totalRevenue)}</Text>

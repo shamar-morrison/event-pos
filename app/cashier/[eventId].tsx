@@ -19,6 +19,7 @@ import {
   X,
   PenLine,
   ChevronRight,
+  Search,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Colors from '@/constants/colors';
@@ -46,6 +47,7 @@ export default function POSScreen() {
   const { data: event, isLoading } = useCashierEventDetail(pairedAdmin?.adminId, eventId);
   const [showCart, setShowCart] = useState(false);
   const [showManual, setShowManual] = useState(false);
+  const [itemSearch, setItemSearch] = useState('');
   const [manualName, setManualName] = useState('');
   const [manualPrice, setManualPrice] = useState('');
   const [manualQty, setManualQty] = useState('1');
@@ -62,6 +64,16 @@ export default function POSScreen() {
     () => (event ? Object.values(event.items).sort((a, b) => a.name.localeCompare(b.name)) : []),
     [event]
   );
+
+  const itemSearchQuery = useMemo(() => itemSearch.trim().toLowerCase(), [itemSearch]);
+
+  const filteredItems = useMemo(() => {
+    if (!itemSearchQuery) {
+      return items;
+    }
+
+    return items.filter((item) => item.name.toLowerCase().includes(itemSearchQuery));
+  }, [itemSearchQuery, items]);
 
   const cartTotal = useMemo(
     () => cart.reduce((sum, l) => sum + l.unitPrice * l.qty, 0),
@@ -165,43 +177,76 @@ export default function POSScreen() {
         }}
       />
 
-      <ScrollView style={styles.itemsScroll} contentContainerStyle={styles.itemsGrid}>
-        {items.map((item) => {
-          const inCart = getCartQtyForItem(item.itemId);
-          const soldOut = item.qtyRemaining === 0;
-          const atMax = inCart >= item.qtyRemaining;
+      <View style={styles.searchBarWrap}>
+        <View style={styles.searchBar}>
+          <Search size={16} color={Colors.textMuted} />
+          <TextInput
+            style={styles.searchInput}
+            value={itemSearch}
+            onChangeText={setItemSearch}
+            placeholder="Search items..."
+            placeholderTextColor={Colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+          />
+        </View>
+      </View>
 
-          return (
-            <TouchableOpacity
-              key={item.itemId}
-              style={[
-                styles.itemCard,
-                { width: CARD_WIDTH },
-                soldOut && styles.itemCardSoldOut,
-                inCart > 0 && styles.itemCardSelected,
-              ]}
-              onPress={() => handleAddInventoryItem(item)}
-              disabled={soldOut}
-              activeOpacity={0.7}
-            >
-              {inCart > 0 && (
-                <View style={styles.cartBadge}>
-                  <Text style={styles.cartBadgeText}>{inCart}</Text>
-                </View>
-              )}
-              <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
-              <Text style={styles.itemCardPrice}>{formatMoney(item.price)}</Text>
-              <Text style={[styles.itemRemaining, soldOut && styles.itemSoldOut]}>
-                {soldOut ? 'SOLD OUT' : `${item.qtyRemaining - inCart} left`}
-              </Text>
-              {!soldOut && (
-                <View style={[styles.addIndicator, atMax && styles.addIndicatorDisabled]}>
-                  <Plus size={16} color={atMax ? Colors.textMuted : Colors.primary} />
-                </View>
-              )}
-            </TouchableOpacity>
-          );
-        })}
+      <ScrollView
+        style={styles.itemsScroll}
+        contentContainerStyle={styles.itemsGrid}
+        keyboardShouldPersistTaps="handled"
+      >
+        {filteredItems.length === 0 ? (
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyStateTitle}>
+              {items.length === 0 ? 'No items added yet' : `No items match "${itemSearch.trim()}"`}
+            </Text>
+            <Text style={styles.emptyStateSubtitle}>
+              {items.length === 0
+                ? 'Ask the admin to add inventory items for this event.'
+                : 'Try a different item name or clear the search.'}
+            </Text>
+          </View>
+        ) : (
+          filteredItems.map((item) => {
+            const inCart = getCartQtyForItem(item.itemId);
+            const soldOut = item.qtyRemaining === 0;
+            const atMax = inCart >= item.qtyRemaining;
+
+            return (
+              <TouchableOpacity
+                key={item.itemId}
+                style={[
+                  styles.itemCard,
+                  { width: CARD_WIDTH },
+                  soldOut && styles.itemCardSoldOut,
+                  inCart > 0 && styles.itemCardSelected,
+                ]}
+                onPress={() => handleAddInventoryItem(item)}
+                disabled={soldOut}
+                activeOpacity={0.7}
+              >
+                {inCart > 0 && (
+                  <View style={styles.cartBadge}>
+                    <Text style={styles.cartBadgeText}>{inCart}</Text>
+                  </View>
+                )}
+                <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
+                <Text style={styles.itemCardPrice}>{formatMoney(item.price)}</Text>
+                <Text style={[styles.itemRemaining, soldOut && styles.itemSoldOut]}>
+                  {soldOut ? 'SOLD OUT' : `${item.qtyRemaining - inCart} left`}
+                </Text>
+                {!soldOut && (
+                  <View style={[styles.addIndicator, atMax && styles.addIndicatorDisabled]}>
+                    <Plus size={16} color={atMax ? Colors.textMuted : Colors.primary} />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })
+        )}
       </ScrollView>
 
       {cartItemCount > 0 && (
@@ -353,6 +398,28 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  searchBarWrap: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+    backgroundColor: Colors.bg,
+  },
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: Colors.card,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  searchInput: {
+    flex: 1,
+    height: 48,
+    fontSize: 16,
+    color: Colors.text,
+  },
   itemsScroll: { flex: 1 },
   itemsGrid: {
     flexDirection: 'row',
@@ -360,6 +427,28 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: CARD_GAP,
     paddingBottom: 100,
+  },
+  emptyState: {
+    width: '100%',
+    backgroundColor: Colors.card,
+    borderRadius: 14,
+    paddingVertical: 36,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyStateTitle: {
+    fontSize: 17,
+    fontWeight: '600' as const,
+    color: Colors.textSecondary,
+    textAlign: 'center',
+  },
+  emptyStateSubtitle: {
+    marginTop: 8,
+    fontSize: 14,
+    color: Colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
   },
   itemCard: {
     backgroundColor: Colors.card,
