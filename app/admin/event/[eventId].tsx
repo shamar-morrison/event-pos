@@ -42,6 +42,7 @@ import EmptyState from '@/components/EmptyState';
 import { posKeys, useAdminEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
 import { isUnlimitedQuantity } from '@/utils/inventory';
+import { DUPLICATE_EVENT_ITEM_ERROR, findEventItemByName, normalizeEventItemName } from '@/utils/item-name';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 import PRESET_DRINKS, { PresetDrink } from '@/constants/preset-drinks';
 import type { EventStatus, PaymentMethod } from '@/types/pos';
@@ -208,9 +209,14 @@ export default function EventDetailScreen() {
   }, []);
 
   const handleAddItem = async () => {
-    const trimmedName = addMode === 'preset' && selectedPreset ? selectedPreset.name : itemName.trim();
-    if (!trimmedName) { Alert.alert('Error', 'Enter item name'); return; }
-    const priceCents = addMode === 'preset' && selectedPreset ? parseDollarInput(itemPrice) : parseDollarInput(itemPrice);
+    const rawName = addMode === 'preset' && selectedPreset ? selectedPreset.name : itemName;
+    const { displayName } = normalizeEventItemName(rawName);
+    if (!displayName) { Alert.alert('Error', 'Enter item name'); return; }
+    if (findEventItemByName(items, displayName)) {
+      Alert.alert('Error', DUPLICATE_EVENT_ITEM_ERROR);
+      return;
+    }
+    const priceCents = parseDollarInput(itemPrice);
     if (priceCents === null || priceCents <= 0) { Alert.alert('Error', 'Enter a valid price'); return; }
     const qtyStr = itemQty.trim();
     let qty: number | null = null;
@@ -222,7 +228,7 @@ export default function EventDetailScreen() {
 
     setAddLoading(true);
     try {
-      await addItem(eventId, trimmedName, priceCents, qty);
+      await addItem(eventId, displayName, priceCents, qty);
       if (pairedAdmin) {
         void queryClient.invalidateQueries({ queryKey: posKeys.events(pairedAdmin.adminId) });
       }

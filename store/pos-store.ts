@@ -28,6 +28,7 @@ import {
 } from '@/services/pos-firestore';
 import { queryClient } from '@/lib/query-client';
 import { normalizeInventoryQuantity } from '@/utils/inventory';
+import { DUPLICATE_EVENT_ITEM_ERROR, findEventItemByName, normalizeEventItemName } from '@/utils/item-name';
 import { hashPin, verifyPin } from '@/utils/pin';
 import { generateId } from '@/utils/uuid';
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth';
@@ -418,18 +419,37 @@ export const usePosStore = create<PosStore>((set, get) => {
 
     addItem: async (eventId: string, name: string, priceCents: number, qty: InventoryQuantity) => {
       const pairedAdmin = requireAdminSession();
+      const { displayName } = normalizeEventItemName(name);
+      if (!displayName) {
+        throw new Error('Enter item name');
+      }
+
+      const itemsSnapshot = await getDocs(eventItemsCollectionRef(pairedAdmin.adminId, eventId));
+      const existingItems = itemsSnapshot.docs.map((itemDoc) => {
+        const itemData = itemDoc.data();
+
+        return {
+          itemId: itemDoc.id,
+          name: typeof itemData.name === 'string' ? itemData.name : '',
+        };
+      });
+
+      if (findEventItemByName(existingItems, displayName)) {
+        throw new Error(DUPLICATE_EVENT_ITEM_ERROR);
+      }
+
       const itemId = generateId();
       const now = Date.now();
       const item = {
         itemId,
-        name,
+        name: displayName,
         price: priceCents,
         qtyRemaining: qty,
         createdAt: now,
         updatedAt: now,
       };
 
-      const auditEntry = buildAuditEntry('item_added', { eventId, itemId, name, priceCents, qty }, now);
+      const auditEntry = buildAuditEntry('item_added', { eventId, itemId, name: displayName, priceCents, qty }, now);
       const batch = writeBatch(firestoreDb);
       batch.set(eventItemDocRef(pairedAdmin.adminId, eventId, itemId), item);
       batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
