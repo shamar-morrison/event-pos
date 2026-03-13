@@ -41,6 +41,7 @@ import StatusBadge from '@/components/StatusBadge';
 import EmptyState from '@/components/EmptyState';
 import { posKeys, useAdminEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
+import { isUnlimitedQuantity } from '@/utils/inventory';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 import PRESET_DRINKS, { PresetDrink } from '@/constants/preset-drinks';
 import type { EventStatus, PaymentMethod } from '@/types/pos';
@@ -53,6 +54,10 @@ const PAYMENT_OPTIONS: { key: PaymentMethod; label: string; IconComp: typeof Ban
 ];
 
 const ADD_ITEM_INPUT_MARGIN = 20;
+
+function getQuantityDisplay(qty: number | null): string {
+  return isUnlimitedQuantity(qty) ? 'Unlimited' : `${qty} remaining`;
+}
 
 export default function EventDetailScreen() {
   const { eventId } = useLocalSearchParams<{ eventId: string }>();
@@ -103,6 +108,8 @@ export default function EventDetailScreen() {
     () => (event ? Object.values(event.items).sort((a, b) => a.name.localeCompare(b.name)) : []),
     [event]
   );
+  const selectedAdjustItem = adjustModal ? event?.items[adjustModal] : undefined;
+  const isAdjustingUnlimited = selectedAdjustItem ? isUnlimitedQuantity(selectedAdjustItem.qtyRemaining) : false;
 
   const ensureInputVisible = useCallback((input: TextInput | null) => {
     if (Platform.OS !== 'android' || !input || !scrollViewRef.current) return;
@@ -206,7 +213,7 @@ export default function EventDetailScreen() {
     const priceCents = addMode === 'preset' && selectedPreset ? parseDollarInput(itemPrice) : parseDollarInput(itemPrice);
     if (priceCents === null || priceCents <= 0) { Alert.alert('Error', 'Enter a valid price'); return; }
     const qtyStr = itemQty.trim();
-    let qty = 0;
+    let qty: number | null = null;
     if (qtyStr !== '') {
       qty = parseInt(qtyStr, 10);
       if (isNaN(qty) || qty < 0) { Alert.alert('Error', 'Enter a valid quantity'); return; }
@@ -241,12 +248,15 @@ export default function EventDetailScreen() {
 
     const item = event?.items[adjustModal];
     if (!item) return;
+    const currentQty = item.qtyRemaining;
 
     try {
-      if (adjustMode === 'add') {
+      if (isUnlimitedQuantity(currentQty)) {
+        await setItemQuantity(eventId, adjustModal, qty);
+      } else if (adjustMode === 'add') {
         await restockItem(eventId, adjustModal, qty);
       } else {
-        const newQty = Math.max(0, item.qtyRemaining - qty);
+        const newQty = Math.max(0, currentQty - qty);
         await setItemQuantity(eventId, adjustModal, newQty);
       }
       if (pairedAdmin) {
@@ -489,7 +499,7 @@ export default function EventDetailScreen() {
                         style={[styles.input, styles.inputHalf]}
                         value={itemQty}
                         onChangeText={setItemQty}
-                        placeholder="Quantity"
+                        placeholder="Qty (blank = unlimited)"
                         placeholderTextColor={Colors.textMuted}
                         keyboardType="number-pad"
                         autoFocus
@@ -531,7 +541,7 @@ export default function EventDetailScreen() {
                       style={[styles.input, styles.inputHalf]}
                       value={itemQty}
                       onChangeText={setItemQty}
-                      placeholder="Quantity"
+                      placeholder="Qty (blank = unlimited)"
                       placeholderTextColor={Colors.textMuted}
                       keyboardType="number-pad"
                       onFocus={() => handleAddItemInputFocus(customQtyInputRef)}
@@ -569,7 +579,7 @@ export default function EventDetailScreen() {
                   </View>
                   <View style={styles.itemFooter}>
                     <Text style={[styles.itemQty, item.qtyRemaining === 0 && styles.itemQtyZero]}>
-                      {item.qtyRemaining} remaining
+                      {getQuantityDisplay(item.qtyRemaining)}
                     </Text>
                     <View style={styles.itemActions}>
                       <TouchableOpacity
@@ -645,11 +655,11 @@ export default function EventDetailScreen() {
       contentStyle={styles.modalContent}
     >
       <Text style={styles.modalTitle}>
-        {adjustMode === 'add' ? 'Restock Item' : 'Reduce Quantity'}
+        {isAdjustingUnlimited ? 'Set Quantity' : adjustMode === 'add' ? 'Restock Item' : 'Reduce Quantity'}
       </Text>
-      {adjustModal && event?.items[adjustModal] && (
+      {selectedAdjustItem && (
         <Text style={styles.modalSubtitle}>
-          Current: {event.items[adjustModal].qtyRemaining} remaining
+          Current: {getQuantityDisplay(selectedAdjustItem.qtyRemaining)}
         </Text>
       )}
       <View style={styles.adjustModeToggle}>
@@ -673,7 +683,7 @@ export default function EventDetailScreen() {
         style={styles.input}
         value={adjustQty}
         onChangeText={setAdjustQty}
-        placeholder={adjustMode === 'add' ? 'Quantity to add' : 'Quantity to remove'}
+        placeholder={isAdjustingUnlimited ? 'New quantity' : adjustMode === 'add' ? 'Quantity to add' : 'Quantity to remove'}
         placeholderTextColor={Colors.textMuted}
         keyboardType="number-pad"
       />
@@ -682,10 +692,12 @@ export default function EventDetailScreen() {
           <Text style={styles.modalCancelText}>Cancel</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.modalConfirm, adjustMode === 'reduce' && { backgroundColor: Colors.statusPaused }]}
+          style={[styles.modalConfirm, !isAdjustingUnlimited && adjustMode === 'reduce' && { backgroundColor: Colors.statusPaused }]}
           onPress={handleAdjustQty}
         >
-          <Text style={styles.modalConfirmText}>{adjustMode === 'add' ? 'Restock' : 'Reduce'}</Text>
+          <Text style={styles.modalConfirmText}>
+            {isAdjustingUnlimited ? 'Set' : adjustMode === 'add' ? 'Restock' : 'Reduce'}
+          </Text>
         </TouchableOpacity>
       </View>
     </KeyboardSafeModal>

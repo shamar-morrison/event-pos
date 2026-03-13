@@ -3,6 +3,7 @@ import {
   CartLine,
   CommitOrderResult,
   EventStatus,
+  InventoryQuantity,
   Order,
   OrderLine,
   PaymentMethod,
@@ -26,6 +27,7 @@ import {
   loadCashier,
 } from '@/services/pos-firestore';
 import { queryClient } from '@/lib/query-client';
+import { normalizeInventoryQuantity } from '@/utils/inventory';
 import { hashPin, verifyPin } from '@/utils/pin';
 import { generateId } from '@/utils/uuid';
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth';
@@ -67,7 +69,7 @@ interface PosStore {
   updateEventStatus: (eventId: string, status: EventStatus) => Promise<void>;
   deleteEvent: (eventId: string) => Promise<void>;
 
-  addItem: (eventId: string, name: string, priceCents: number, qty: number) => Promise<string>;
+  addItem: (eventId: string, name: string, priceCents: number, qty: InventoryQuantity) => Promise<string>;
   restockItem: (eventId: string, itemId: string, additionalQty: number) => Promise<void>;
   setItemQuantity: (eventId: string, itemId: string, newQty: number) => Promise<void>;
   removeItem: (eventId: string, itemId: string) => Promise<void>;
@@ -414,7 +416,7 @@ export const usePosStore = create<PosStore>((set, get) => {
       await batch.commit();
     },
 
-    addItem: async (eventId: string, name: string, priceCents: number, qty: number) => {
+    addItem: async (eventId: string, name: string, priceCents: number, qty: InventoryQuantity) => {
       const pairedAdmin = requireAdminSession();
       const itemId = generateId();
       const now = Date.now();
@@ -437,13 +439,27 @@ export const usePosStore = create<PosStore>((set, get) => {
 
     restockItem: async (eventId: string, itemId: string, additionalQty: number) => {
       const pairedAdmin = requireAdminSession();
+      const itemReference = eventItemDocRef(pairedAdmin.adminId, eventId, itemId);
+      const itemSnapshot = await getDoc(itemReference);
+      if (!itemSnapshot.exists()) {
+        throw new Error('Item not found');
+      }
+
+      const currentQty = normalizeInventoryQuantity(itemSnapshot.data().qtyRemaining);
       const now = Date.now();
       const auditEntry = buildAuditEntry('item_restocked', { eventId, itemId, additionalQty }, now);
       const batch = writeBatch(firestoreDb);
-      batch.update(eventItemDocRef(pairedAdmin.adminId, eventId, itemId), {
-        qtyRemaining: increment(additionalQty),
-        updatedAt: now,
-      });
+      if (currentQty === null) {
+        batch.update(itemReference, {
+          qtyRemaining: additionalQty,
+          updatedAt: now,
+        });
+      } else {
+        batch.update(itemReference, {
+          qtyRemaining: increment(additionalQty),
+          updatedAt: now,
+        });
+      }
       batch.set(auditLogDocRef(pairedAdmin.adminId, auditEntry.id), auditEntry);
       await batch.commit();
     },
@@ -459,8 +475,7 @@ export const usePosStore = create<PosStore>((set, get) => {
         throw new Error('Item not found');
       }
 
-      const previousQty =
-        typeof itemSnapshot.data().qtyRemaining === 'number' ? itemSnapshot.data().qtyRemaining : 0;
+      const previousQty = normalizeInventoryQuantity(itemSnapshot.data().qtyRemaining);
       const now = Date.now();
       const auditEntry = buildAuditEntry('item_qty_set', { eventId, itemId, from: previousQty, to: newQty }, now);
       const batch = writeBatch(firestoreDb);
@@ -643,7 +658,7 @@ export const usePosStore = create<PosStore>((set, get) => {
         );
 
         let updatedStats = createEmptyStats();
-        const updatedItemQuantities: Record<string, number> = {};
+        const updatedItemQuantities: Record<string, InventoryQuantity> = {};
 
         await runTransaction(firestoreDb, async (transaction) => {
           const eventReference = eventDocRef(pairedAdmin.adminId, currentEventId);
@@ -670,19 +685,20 @@ export const usePosStore = create<PosStore>((set, get) => {
             }
 
             const itemData = itemSnapshot.data() as Record<string, unknown>;
-            const qtyRemaining =
-              typeof itemData.qtyRemaining === 'number' && Number.isFinite(itemData.qtyRemaining)
-                ? itemData.qtyRemaining
-                : 0;
+            const qtyRemaining = normalizeInventoryQuantity(itemData.qtyRemaining);
 
-            if (qtyRemaining < inventoryLines[index].qty) {
+            if (qtyRemaining !== null && qtyRemaining < inventoryLines[index].qty) {
               throw new Error(`Not enough "${inventoryLines[index].name}" in stock (${qtyRemaining} remaining).`);
             }
           });
 
           itemSnapshots.forEach((itemSnapshot, index) => {
             const itemData = itemSnapshot.data() as Record<string, unknown>;
-            const qtyRemaining = typeof itemData.qtyRemaining === 'number' ? itemData.qtyRemaining : 0;
+            const qtyRemaining = normalizeInventoryQuantity(itemData.qtyRemaining);
+            if (qtyRemaining === null) {
+              return;
+            }
+
             const nextQty = qtyRemaining - inventoryLines[index].qty;
             updatedItemQuantities[inventoryLines[index].itemId] = nextQty;
             transaction.update(itemSnapshot.ref, {

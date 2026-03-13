@@ -19,6 +19,7 @@ import {
   type DocumentReference,
   type Unsubscribe,
 } from 'firebase/firestore';
+import { normalizeInventoryQuantity } from '@/utils/inventory';
 
 function toNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
@@ -62,7 +63,7 @@ function normalizeEventItem(itemId: string, data: DocumentData | undefined): Eve
     itemId,
     name: typeof data?.name === 'string' ? data.name : 'Item',
     price: toNumber(data?.price, 0),
-    qtyRemaining: toNumber(data?.qtyRemaining, 0),
+    qtyRemaining: normalizeInventoryQuantity(data?.qtyRemaining),
     createdAt: toNumber(data?.createdAt, now),
     updatedAt: toNumber(data?.updatedAt, now),
   };

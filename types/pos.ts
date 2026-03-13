@@ -2,6 +2,7 @@ export type PaymentMethod = 'cash' | 'card' | 'mobile' | 'comp';
 export type EventStatus = 'draft' | 'live' | 'paused' | 'closed';
 export type OrderStatus = 'completed' | 'voided' | 'refunded';
 export type LineType = 'inventory' | 'manual';
+export type InventoryQuantity = number | null;
 
 export interface OrderLine {
   type: LineType;
@@ -30,7 +31,7 @@ export interface EventItem {
   itemId: string;
   name: string;
   price: number;
-  qtyRemaining: number;
+  qtyRemaining: InventoryQuantity;
   createdAt: number;
   updatedAt: number;
 }
@@ -122,7 +123,7 @@ export interface CartLine {
 export interface CommitOrderResult {
   order: Order;
   updatedStats: EventStats;
-  updatedItemQuantities: Record<string, number>;
+  updatedItemQuantities: Record<string, InventoryQuantity>;
 }
 
 export function createEmptyStats(): EventStats {

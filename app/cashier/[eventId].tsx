@@ -28,6 +28,7 @@ import Colors from '@/constants/colors';
 import KeyboardSafeModal from '@/components/KeyboardSafeModal';
 import { useCashierEventDetail } from '@/hooks/use-pos-data';
 import { usePosStore } from '@/store/pos-store';
+import { isUnlimitedQuantity } from '@/utils/inventory';
 import { formatMoney, parseDollarInput } from '@/utils/money';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -251,9 +252,10 @@ export default function POSScreen() {
   );
 
   const handleAddInventoryItem = useCallback(
-    (item: { itemId: string; name: string; price: number; qtyRemaining: number }) => {
+    (item: { itemId: string; name: string; price: number; qtyRemaining: number | null }) => {
+      const qtyRemaining = item.qtyRemaining;
       const inCart = getCartQtyForItem(item.itemId);
-      if (inCart >= item.qtyRemaining) {
+      if (!isUnlimitedQuantity(qtyRemaining) && inCart >= qtyRemaining) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
         return;
       }
@@ -264,7 +266,7 @@ export default function POSScreen() {
         name: item.name,
         unitPrice: item.price,
         qty: 1,
-        maxQty: item.qtyRemaining,
+        maxQty: isUnlimitedQuantity(qtyRemaining) ? undefined : qtyRemaining,
       });
     },
     [addToCart, getCartQtyForItem]
@@ -370,8 +372,11 @@ export default function POSScreen() {
         ) : (
           filteredItems.map((item) => {
             const inCart = getCartQtyForItem(item.itemId);
+            const qtyRemaining = item.qtyRemaining;
+            const isUnlimitedStock = isUnlimitedQuantity(qtyRemaining);
             const soldOut = item.qtyRemaining === 0;
-            const atMax = inCart >= item.qtyRemaining;
+            const finiteQtyRemaining = isUnlimitedStock ? 0 : qtyRemaining;
+            const atMax = !isUnlimitedStock && inCart >= finiteQtyRemaining;
 
             return (
               <TouchableOpacity
@@ -394,7 +399,7 @@ export default function POSScreen() {
                 <Text style={styles.itemName} numberOfLines={2}>{item.name}</Text>
                 <Text style={styles.itemCardPrice}>{formatMoney(item.price)}</Text>
                 <Text style={[styles.itemRemaining, soldOut && styles.itemSoldOut]}>
-                  {soldOut ? 'SOLD OUT' : `${item.qtyRemaining - inCart} left`}
+                  {soldOut ? 'SOLD OUT' : isUnlimitedStock ? 'Unlimited' : `${finiteQtyRemaining - inCart} left`}
                 </Text>
                 {!soldOut && (
                   <View style={[styles.addIndicator, atMax && styles.addIndicatorDisabled]}>
