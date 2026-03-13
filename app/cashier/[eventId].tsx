@@ -64,6 +64,7 @@ export default function POSScreen() {
   const [manualPrice, setManualPrice] = useState('');
   const [manualQty, setManualQty] = useState('1');
   const [manualReason, setManualReason] = useState('');
+  const itemSearchInputRef = React.useRef<TextInput | null>(null);
   const manualNameInputRef = React.useRef<TextInput | null>(null);
   const cartTranslateY = React.useRef(new Animated.Value(CART_SHEET_HIDDEN_OFFSET)).current;
   const cartBackdropOpacity = React.useRef(new Animated.Value(0)).current;
@@ -325,6 +326,13 @@ export default function POSScreen() {
     }
   }, [eventId, pairedAdmin?.adminId, refetch]);
 
+  const handleClearSearch = useCallback(() => {
+    setItemSearch('');
+    requestAnimationFrame(() => {
+      itemSearchInputRef.current?.focus();
+    });
+  }, []);
+
   if (isLoading) {
     return (
       <View style={styles.container}>
@@ -373,6 +381,7 @@ export default function POSScreen() {
         <View style={styles.searchBar}>
           <Search size={16} color={Colors.textMuted} />
           <TextInput
+            ref={itemSearchInputRef}
             style={styles.searchInput}
             value={itemSearch}
             onChangeText={setItemSearch}
@@ -382,6 +391,17 @@ export default function POSScreen() {
             autoCorrect={false}
             returnKeyType="search"
           />
+          {itemSearch.length > 0 && (
+            <TouchableOpacity
+              style={styles.searchClearButton}
+              onPress={handleClearSearch}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+              hitSlop={8}
+            >
+              <X size={16} color={Colors.textMuted} />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -662,6 +682,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: Colors.text,
   },
+  searchClearButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   itemsScroll: { flex: 1 },
   itemsGrid: {
     flexGrow: 1,
@@ -701,6 +728,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     padding: 14,
     minHeight: 120,
+    alignSelf: 'flex-start',
     justifyContent: 'space-between',
   },
   itemCardSoldOut: { opacity: 0.35 },
